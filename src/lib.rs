@@ -3,6 +3,7 @@ extern crate xml;
 use std::fs::File;
 use std::io::BufReader;
 use std::default::Default;
+use std::collections::HashMap;
 
 use xml::reader::{EventReader, XmlEvent};
 
@@ -177,25 +178,29 @@ fn is_valid_parent(p: Option<MavXmlElement>, s: MavXmlElement) -> bool {
     }
 }
 
+#[derive(Debug, PartialEq, Clone)]
+struct MavProfile {
+    includes: Vec<String>,
+    messages: HashMap<u8, MavMessage>,
+    enums: HashMap<String, MavEnum>,
+}
 
-#[test]
-fn test_all() {
-    let file = File::open("solo.xml").unwrap();
-    let file = BufReader::new(file);
-
+fn parse_profile<'r>(file: Box<::std::io::Read>) -> MavProfile {
     let mut stack: Vec<MavXmlElement> = vec![];
 
-    let mut messages: Vec<MavMessage> = vec![];
-    let mut enums: Vec<MavEnum> = vec![];
+    let mut profile = MavProfile {
+        includes: vec![],
+        messages: HashMap::new(),
+        enums: HashMap::new(),
+    };
 
     let mut field: MavField = Default::default();
     let mut message: MavMessage = Default::default();
     let mut mavenum: MavEnum = Default::default();
     let mut entry: MavEnumEntry = Default::default();
     let mut paramid: Option<usize> = None;
-
+    
     let parser = EventReader::new(file);
-    let mut depth = 0;
     for e in parser {
         match e {
             Ok(XmlEvent::StartElement { name, attributes: attrs, .. }) => {
@@ -295,8 +300,6 @@ fn test_all() {
                         _ => (),
                     }
                 }
-
-                depth += 1;
             }
             Ok(XmlEvent::Characters(s)) => {
                 use MavXmlElement::*;
@@ -331,21 +334,19 @@ fn test_all() {
                     Some(&MavXmlElement::Field) => {
                         message.fields.push(field.clone())
                     },
-                    Some(&MavXmlElement::Message) => {
-                        // println!("message: {:?}", message);
-                        messages.push(message.clone());
-                    },
                     Some(&MavXmlElement::Entry) => {
                         mavenum.entries.push(entry.clone());
                     },
+                    Some(&MavXmlElement::Message) => {
+                        // println!("message: {:?}", message);
+                        profile.messages.insert(message.id, message.clone());
+                    },
                     Some(&MavXmlElement::Enum) => {
-                        println!("enum: {:?}", mavenum);
-                        enums.push(mavenum.clone());
+                        profile.enums.insert(mavenum.name.clone(), mavenum.clone());
                     },
                     _ => (),
                 }
                 stack.pop();
-                depth -= 1;
                 // println!("{}-{}", indent(depth), name);
             }
             Err(e) => {
@@ -355,4 +356,18 @@ fn test_all() {
             _ => {}
         }
     }
+
+    profile
+}
+
+#[test]
+fn test_all() {
+    let file = File::open("solo.xml").unwrap();
+    let file = BufReader::new(file);
+
+    let profile = parse_profile(Box::new(file));
+    // println!("done: {:?}", profile);
+
+    println!("message 150: {:?}", profile.messages.get(&150));
+    println!("enum MAV_CMD: {:?}", profile.enums.get("MAV_CMD".into()));
 }

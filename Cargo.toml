@@ -1,0 +1,7 @@
+[package]
+name = "dronekit-daemon"
+version = "0.1.0"
+authors = ["Tim Ryan <tim@3drobotics.com>"]
+
+[dependencies]
+xml-rs = "0.2"

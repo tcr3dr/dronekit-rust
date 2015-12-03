@@ -14,10 +14,10 @@ fn indent(size: usize) -> String {
 }
 
 #[derive(Debug, PartialEq, Clone)]
-struct MavEnum {
-    name: String,
-    description: Option<String>,
-    entries: Vec<MavEnumEntry>
+pub struct MavEnum {
+    pub name: String,
+    pub description: Option<String>,
+    pub entries: Vec<MavEnumEntry>
 }
 
 impl Default for MavEnum {
@@ -31,11 +31,11 @@ impl Default for MavEnum {
 }
 
 #[derive(Debug, PartialEq, Clone)]
-struct MavEnumEntry {
-    value: i32,
-    name: String,
-    description: Option<String>,
-    params: Option<Vec<String>>,
+pub struct MavEnumEntry {
+    pub value: i32,
+    pub name: String,
+    pub description: Option<String>,
+    pub params: Option<Vec<String>>,
 }
 
 impl Default for MavEnumEntry {
@@ -50,11 +50,11 @@ impl Default for MavEnumEntry {
 }
 
 #[derive(Debug, PartialEq, Clone)]
-struct MavMessage {
-    id: u8,
-    name: String,
-    description: Option<String>,
-    fields: Vec<MavField>,
+pub struct MavMessage {
+    pub id: u8,
+    pub name: String,
+    pub description: Option<String>,
+    pub fields: Vec<MavField>,
 }
 
 impl Default for MavMessage {
@@ -69,7 +69,7 @@ impl Default for MavMessage {
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
-enum MavType {
+pub enum MavType {
     UInt8MavlinkVersion,
     UInt8,
     UInt16,
@@ -113,11 +113,11 @@ fn parse_type(s: &str) -> Option<MavType> {
 }
 
 #[derive(Debug, PartialEq, Clone)]
-struct MavField {
-    mavtype: MavType,
-    name: String,
-    description: Option<String>,
-    enumtype: Option<String>,
+pub struct MavField {
+    pub mavtype: MavType,
+    pub name: String,
+    pub description: Option<String>,
+    pub enumtype: Option<String>,
 }
 
 impl Default for MavField {
@@ -132,7 +132,7 @@ impl Default for MavField {
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
-enum MavXmlElement {
+pub enum MavXmlElement {
     Mavlink,
     Include,
     Enums,
@@ -179,13 +179,13 @@ fn is_valid_parent(p: Option<MavXmlElement>, s: MavXmlElement) -> bool {
 }
 
 #[derive(Debug, PartialEq, Clone)]
-struct MavProfile {
-    includes: Vec<String>,
-    messages: HashMap<u8, MavMessage>,
-    enums: HashMap<String, MavEnum>,
+pub struct MavProfile {
+    pub includes: Vec<String>,
+    pub messages: HashMap<u8, MavMessage>,
+    pub enums: HashMap<String, MavEnum>,
 }
 
-fn parse_profile<'r>(file: Box<::std::io::Read>) -> MavProfile {
+pub fn parse_profile<'r>(file: Box<::std::io::Read>) -> MavProfile {
     let mut stack: Vec<MavXmlElement> = vec![];
 
     let mut profile = MavProfile {

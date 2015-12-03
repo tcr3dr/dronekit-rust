@@ -1,7 +1,14 @@
 [package]
-name = "dronekit-daemon"
+name = "dronekit"
 version = "0.1.0"
 authors = ["Tim Ryan <tim@3drobotics.com>"]
 
 [dependencies]
 xml-rs = "0.2"
+mio = "0.4"
+bytes = "*"
+crc16 = "0.3.3"
+byteorder = "0.4.2"
+
+[[bin]]
+name = "test"

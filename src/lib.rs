@@ -7,12 +7,6 @@ use std::collections::HashMap;
 
 use xml::reader::{EventReader, XmlEvent};
 
-fn indent(size: usize) -> String {
-    const INDENT: &'static str = "    ";
-    (0..size).map(|_| INDENT)
-             .fold(String::with_capacity(size*INDENT.len()), |r, s| r + s)
-}
-
 #[derive(Debug, PartialEq, Clone)]
 pub struct MavEnum {
     pub name: String,
@@ -238,7 +232,6 @@ pub fn parse_profile<'r>(file: Box<::std::io::Read>) -> MavProfile {
                 }
 
                 stack.push(id);
-                // println!("{}+{:?}", indent(depth), id);
 
                 for attr in attrs {
                     match stack.last() {

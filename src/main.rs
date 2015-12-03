@@ -20,6 +20,60 @@ use std::net::SocketAddr;
 
 const CLIENT: mio::Token = mio::Token(0);
 
+struct MavPacket {
+    payload: Vec<u8>,
+}
+
+trait Parsable {
+    fn parse(payload: &[u8]) -> Self;
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MAV_HEARTBEAT {
+    mtype: u8,
+    autopilot: u8,
+    base_mode: u8,
+    custom_mode: u32,
+    system_status: u8,
+    mavlink_version: u8,
+}
+
+impl Parsable for MAV_HEARTBEAT {
+    fn parse(payload: &[u8]) -> MAV_HEARTBEAT {
+        let mut cur = Cursor::new(payload);
+        MAV_HEARTBEAT {
+            custom_mode: cur.read_u32::<LittleEndian>().unwrap(),
+            mtype: cur.read_u8().unwrap(),
+            autopilot: cur.read_u8().unwrap(),
+            base_mode: cur.read_u8().unwrap(),
+            system_status: cur.read_u8().unwrap(),
+            mavlink_version: cur.read_u8().unwrap(),
+        }
+    }
+}
+
+impl MavPacket {
+    fn new(payload: &[u8]) -> MavPacket {
+        MavPacket {
+            payload: payload.into(),
+        }
+    }
+
+    fn parse<A: Parsable>(&self) -> A {
+        println!("parse? {:?}", self.payload);
+        A::parse(&self.payload[6..])
+    }
+
+    fn check_crc(&self) -> bool {
+        let mut crc = crc16::State::<crc16::MCRF4XX>::new();
+        crc.update(&self.payload[1..self.payload.len()-2]);
+        crc.update(&[50]);
+        let pktcrc = Cursor::new(&self.payload[self.payload.len()-2..]).read_u16::<LittleEndian>().unwrap();
+        println!("match crc {:?} against {:?}", crc.get(), pktcrc);
+        crc.get() == pktcrc
+    }
+}
+
 struct Pong {
     socket: TcpStream,
     buf: Vec<u8>,
@@ -70,14 +124,11 @@ impl mio::Handler for Pong {
                                         break;
                                     }
 
-                                    let packet = &self.buf[(start + i)..(start + i + 8 + len)];
-                                    let mut crc = crc16::State::<crc16::MCRF4XX>::new();
-                                    crc.update(&packet[1..packet.len()-2]);
-                                    crc.update(&[50]);
-                                    let pktcrc = Cursor::new(&packet[packet.len()-2..]).read_u16::<LittleEndian>().unwrap();
-                                    println!("match crc {:?} against {:?}", crc.get(), pktcrc);
+                                    let packet = MavPacket::new(&self.buf[(start + i)..(start + i + 8 + len)]);
 
-                                    if crc.get() != pktcrc {
+                                    println!("packet {:?}", packet.parse::<MAV_HEARTBEAT>());
+
+                                    if !packet.check_crc() {
                                         start += i + 1;
                                         continue;
                                     }

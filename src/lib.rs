@@ -134,6 +134,25 @@ impl MavType {
         }
     }
 
+    pub fn primitive_type(&self) -> String {
+        use MavType::*;
+        match self.clone() {
+            UInt8MavlinkVersion => "uint8_t".into(),
+            UInt8 => "uint8_t".into(),
+            Int8 => "int8_t".into(),
+            Char => "char".into(),
+            UInt16 => "uint16_t".into(),
+            Int16 => "int16_t".into(),
+            UInt32 => "uint32_t".into(),
+            Int32 => "int32_t".into(),
+            Float => "float".into(),
+            UInt64 => "uint64_t".into(),
+            Int64 => "int64_t".into(),
+            Double => "double".into(),
+            Array(t, size) => t.primitive_type(),
+        }
+    }
+
     pub fn rust_type(&self) -> String {
         use MavType::*;
         match self.clone() {

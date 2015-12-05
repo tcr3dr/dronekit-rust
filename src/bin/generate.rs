@@ -18,6 +18,29 @@ use std::{mem, str};
 use std::io::Cursor;
 use std::net::SocketAddr;
 
+pub fn extra_crc(msg: &MavMessage) -> u8 {
+    // calculate a 8-bit checksum of the key fields of a message, so we
+    // can detect incompatible XML changes
+    let mut crc = crc16::State::<crc16::MCRF4XX>::new();
+    crc.update(msg.name.as_bytes());
+    crc.update(" ".as_bytes());
+
+    let mut f = msg.fields.clone();
+    f.sort_by(|a, b| a.mavtype.compare(&b.mavtype));
+    for field in &f {
+        crc.update(field.mavtype.primitive_type().as_bytes());
+        crc.update(" ".as_bytes());
+        crc.update(field.name.as_bytes());
+        crc.update(" ".as_bytes());
+        if let MavType::Array(_, size) = field.mavtype {
+            crc.update(&[size as u8]);
+        }
+    }
+
+    let crcval = crc.get();
+    ((crcval & 0xFF) ^ (crcval >> 8)) as u8
+}
+
 pub fn main() {
     let file = File::open("common.xml").unwrap();
     let file = BufReader::new(file);
@@ -139,9 +162,34 @@ pub fn main() {
     println!("    pub fn parse(id: u8, payload: &[u8]) -> Option<DkMessage> {{");
     println!("        match id {{");
     for item in &profile.messages {
-            println!("            {} => Some(DkMessage::{}({}_DATA::parse(payload))),", item.id, item.name, item.name);
-        }
+        println!("            {} => Some(DkMessage::{}({}_DATA::parse(payload))),", item.id, item.name, item.name);
+    }
     println!("            _ => None,");
+    println!("        }}");
+    println!("    }}");
+    println!("");
+    println!("    pub fn message_id(&self) -> u8 {{");
+    println!("        match self {{");
+    for item in &profile.messages {
+        println!("            &DkMessage::{}(..) => {},", item.name, item.id);
+    }
+    println!("        }}");
+    println!("    }}");
+    println!("");
+    println!("    pub fn extra_crc(id: u8) -> u8 {{");
+    println!("        match id {{");
+    for item in &profile.messages {
+        println!("            {} => {},", item.id, extra_crc(item));
+    }
+    println!("            _ => 0,");
+    println!("        }}");
+    println!("    }}");
+    println!("");
+    println!("    pub fn serialize(&self) -> Vec<u8> {{");
+    println!("        match self {{");
+    for item in &profile.messages {
+        println!("            &DkMessage::{}(ref body) => body.serialize(),", item.name);
+    }
     println!("        }}");
     println!("    }}");
     println!("}}");

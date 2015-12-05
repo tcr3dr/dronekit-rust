@@ -72,7 +72,7 @@ impl MavPacket {
     fn calc_crc(&self) -> u16 {
         let mut crc = crc16::State::<crc16::MCRF4XX>::new();
         crc.update(&self.encode_nocrc()[1..]);
-        crc.update(&[50]);
+        crc.update(&[DkMessage::extra_crc(self.message_id)]);
         crc.get()
     }
 
@@ -88,43 +88,66 @@ impl MavPacket {
 struct Pong {
     socket: TcpStream,
     buf: Vec<u8>,
-    msg_id: u8,   
+    msg_id: u8,
+    started: bool,
 }
 
 impl Pong {
+    fn send(&mut self, data: DkMessage) -> (usize, Result<Option<usize>, ::std::io::Error>) {
+        let mut pkt = MavPacket {
+            seq: self.msg_id,
+            system_id: 255,
+            component_id: 0,
+            message_id: data.message_id(),
+            data: data.serialize(),
+            checksum: 0,
+        };
+        pkt.update_crc();
+        let out = pkt.encode();
+        let outlen = out.len();
+
+        self.msg_id = self.msg_id.wrapping_add(1);
+
+        println!(">>> {:?}", out);
+        let mut cur = Cursor::new(out);
+        (outlen, self.socket.try_write_buf(&mut cur))
+    }
+
     fn on_message(&mut self, pkt: DkMessage) {
         match pkt {
             DkMessage::HEARTBEAT(..) => {
-                let out = MavPacket {
-                    seq: self.msg_id,
-                    system_id: 255,
-                    component_id: 0,
-                    message_id: 0,
-                    data: HEARTBEAT_DATA {
-                        custom_mode: 0,
-                        mavtype: 6,
-                        autopilot: 8,
-                        base_mode: 0,
-                        system_status: 0,
-                        mavlink_version: 0x3,
-                    }.serialize(),
-                    checksum: 0,
-                }.encode();
-                let outlen = out.len();
+                let (outlen, res) = self.send(DkMessage::HEARTBEAT(HEARTBEAT_DATA {
+                    custom_mode: 0,
+                    mavtype: 6,
+                    autopilot: 8,
+                    base_mode: 0,
+                    system_status: 0,
+                    mavlink_version: 0x3,
+                }));
 
-                self.msg_id = self.msg_id.wrapping_add(1);
-
-                let mut cur = Cursor::new(out);
-                if let Ok(Some(n)) = self.socket.try_write_buf(&mut cur) {
+                if let Ok(Some(n)) = res {
                     if n != outlen {
                         println!("ERROR: only wrote {:?}", n);
                     }
                 } else {
                     println!("ERROR: didnt write anything");
                 }
+
+                if !self.started {
+                    self.started = true;
+
+                    let res = self.send(DkMessage::PARAM_REQUEST_LIST(PARAM_REQUEST_LIST_DATA {
+                        target_system: 0,
+                        target_component: 0,
+                    }));
+                    println!("start params {:?}", res);
+                }
             },
             DkMessage::STATUSTEXT(data) => {
-                let text = data.text.iter().take_while(|a| **a != 0).map(|x| *x as char).collect::<String>();
+                let text = data.text.iter()
+                    .take_while(|a| **a != 0)
+                    .map(|x| *x as char)
+                    .collect::<String>();
                 println!("<<< [{:?}] {:?}", data.severity, text);
             },
             _ => {
@@ -248,6 +271,7 @@ fn run(address: SocketAddr) {
         socket: socket,
         buf: vec![],
         msg_id: 0,
+        started: false,
     });
 }
 

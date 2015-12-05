@@ -5,7 +5,9 @@ extern crate crc16;
 extern crate byteorder;
 
 use dronekit::*;
+use dronekit::mavlink::*;
 
+use std::num::Wrapping;
 use byteorder::{BigEndian, LittleEndian, ReadBytesExt};
 
 use std::fs::File;
@@ -20,63 +22,116 @@ use std::net::SocketAddr;
 
 const CLIENT: mio::Token = mio::Token(0);
 
+#[derive(Debug)]
 struct MavPacket {
-    payload: Vec<u8>,
-}
-
-trait Parsable {
-    fn parse(payload: &[u8]) -> Self;
-}
-
-#[derive(Clone, Copy, Debug)]
-struct MAV_HEARTBEAT {
-    mtype: u8,
-    autopilot: u8,
-    base_mode: u8,
-    custom_mode: u32,
-    system_status: u8,
-    mavlink_version: u8,
-}
-
-impl Parsable for MAV_HEARTBEAT {
-    fn parse(payload: &[u8]) -> MAV_HEARTBEAT {
-        let mut cur = Cursor::new(payload);
-        MAV_HEARTBEAT {
-            custom_mode: cur.read_u32::<LittleEndian>().unwrap(),
-            mtype: cur.read_u8().unwrap(),
-            autopilot: cur.read_u8().unwrap(),
-            base_mode: cur.read_u8().unwrap(),
-            system_status: cur.read_u8().unwrap(),
-            mavlink_version: cur.read_u8().unwrap(),
-        }
-    }
+    seq: u8,
+    system_id: u8,
+    component_id: u8,
+    message_id: u8,
+    data: Vec<u8>,
+    checksum: u16,
 }
 
 impl MavPacket {
     fn new(payload: &[u8]) -> MavPacket {
+        let mut cur = Cursor::new(payload);
+        cur.set_position(2);
         MavPacket {
-            payload: payload.into(),
+            seq: cur.read_u8().unwrap(),
+            system_id: cur.read_u8().unwrap(),
+            component_id: cur.read_u8().unwrap(),
+            message_id: cur.read_u8().unwrap(),
+            data: payload[6..payload.len()-2].to_vec(),
+            checksum: {
+                cur.set_position((payload.len() - 2) as u64);
+                cur.read_u16::<LittleEndian>().unwrap()
+            },
         }
     }
 
-    fn parse<A: Parsable>(&self) -> A {
-        println!("parse? {:?}", self.payload);
-        A::parse(&self.payload[6..])
+    fn parse(&self) -> Option<DkMessage> {
+        DkMessage::parse(self.message_id, &self.data)
+    }
+
+    fn encode_nocrc(&self) -> Vec<u8> {
+        let mut pkt: Vec<u8> = vec![
+            0xfe, self.data.len() as u8, self.seq,
+            self.system_id, self.component_id, self.message_id,
+        ];
+        pkt.extend(&self.data);
+        pkt
+    }
+
+    fn encode(&self) -> Vec<u8> {
+        let mut pkt = self.encode_nocrc();
+        pkt.push((self.checksum >> 8) as u8);
+        pkt.push((self.checksum & 0xff) as u8);
+        pkt
+    }
+
+    fn calc_crc(&self) -> u16 {
+        let mut crc = crc16::State::<crc16::MCRF4XX>::new();
+        crc.update(&self.encode_nocrc()[1..]);
+        crc.update(&[50]);
+        crc.get()
+    }
+
+    fn update_crc(&mut self) {
+        self.checksum = self.calc_crc();
     }
 
     fn check_crc(&self) -> bool {
-        let mut crc = crc16::State::<crc16::MCRF4XX>::new();
-        crc.update(&self.payload[1..self.payload.len()-2]);
-        crc.update(&[50]);
-        let pktcrc = Cursor::new(&self.payload[self.payload.len()-2..]).read_u16::<LittleEndian>().unwrap();
-        println!("match crc {:?} against {:?}", crc.get(), pktcrc);
-        crc.get() == pktcrc
+        self.calc_crc() == self.checksum
     }
 }
 
 struct Pong {
     socket: TcpStream,
     buf: Vec<u8>,
+    msg_id: u8,   
+}
+
+impl Pong {
+    fn on_message(&mut self, pkt: DkMessage) {
+        match pkt {
+            DkMessage::HEARTBEAT(..) => {
+                let out = MavPacket {
+                    seq: self.msg_id,
+                    system_id: 255,
+                    component_id: 0,
+                    message_id: 0,
+                    data: HEARTBEAT_DATA {
+                        custom_mode: 0,
+                        mavtype: 6,
+                        autopilot: 8,
+                        base_mode: 0,
+                        system_status: 0,
+                        mavlink_version: 0x3,
+                    }.serialize(),
+                    checksum: 0,
+                }.encode();
+                let outlen = out.len();
+
+                self.msg_id = self.msg_id.wrapping_add(1);
+
+                let mut cur = Cursor::new(out);
+                if let Ok(Some(n)) = self.socket.try_write_buf(&mut cur) {
+                    if n != outlen {
+                        println!("ERROR: only wrote {:?}", n);
+                    }
+                } else {
+                    println!("ERROR: didnt write anything");
+                }
+            },
+            DkMessage::STATUSTEXT(data) => {
+                let text = data.text.iter().take_while(|a| **a != 0).map(|x| *x as char).collect::<String>();
+                println!("<<< [{:?}] {:?}", data.severity, text);
+            },
+            _ => {
+                println!("dunno: {:?}", pkt);  
+            },
+        }
+    }
 }
 
 impl mio::Handler for Pong {
@@ -124,13 +179,23 @@ impl mio::Handler for Pong {
                                         break;
                                     }
 
-                                    let packet = MavPacket::new(&self.buf[(start + i)..(start + i + 8 + len)]);
+                                    let packet;
+                                    {
+                                        let pktbuf = &self.buf[(start + i)..(start + i + 8 + len)];
+                                        packet = MavPacket::new(pktbuf);
 
-                                    println!("packet {:?}", packet.parse::<MAV_HEARTBEAT>());
+                                        // println!("ok {:?}", pktbuf);
 
-                                    if !packet.check_crc() {
-                                        start += i + 1;
-                                        continue;
+                                        // if !packet.check_crc() {
+                                        //     println!("failed CRC!");
+                                        //     start += i + 1;
+                                        //     continue;
+                                        // }
+                                    }
+
+                                    // handle packet
+                                    if let Some(pkt) = packet.parse() {
+                                        self.on_message(pkt);
                                     }
                                     
                                     // change this
@@ -179,12 +244,17 @@ fn run(address: SocketAddr) {
         mio::PollOpt::edge()).unwrap();
 
     println!("running pingpong socket");
-    event_loop.run(&mut Pong { socket: socket, buf: vec![] });
+    event_loop.run(&mut Pong {
+        socket: socket,
+        buf: vec![],
+        msg_id: 0,
+    });
 }
 
 pub fn main() {
     let file = File::open("solo.xml").unwrap();
     let file = BufReader::new(file);
     let profile = parse_profile(Box::new(file));
+
     run("127.0.0.1:5760".parse().unwrap());
 }

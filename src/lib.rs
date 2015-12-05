@@ -1,9 +1,13 @@
 extern crate xml;
+extern crate byteorder;
+
+pub mod mavlink;
 
 use std::fs::File;
 use std::io::BufReader;
 use std::default::Default;
 use std::collections::HashMap;
+use std::cmp::Ordering;
 
 use xml::reader::{EventReader, XmlEvent};
 
@@ -62,7 +66,7 @@ impl Default for MavMessage {
     }
 }
 
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum MavType {
     UInt8MavlinkVersion,
     UInt8,
@@ -76,12 +80,13 @@ pub enum MavType {
     Char,
     Float,
     Double,
-    Buffer(u32),
+    Array(Box<MavType>, usize),
 }
 
 fn parse_type(s: &str) -> Option<MavType> {
     use MavType::*;
     match s {
+        "uint8_t_mavlink_version" => Some(UInt8MavlinkVersion),
         "uint8_t" => Some(UInt8),
         "uint16_t" => Some(UInt16),
         "uint32_t" => Some(UInt32),
@@ -94,15 +99,63 @@ fn parse_type(s: &str) -> Option<MavType> {
         "float" => Some(Float),
         "Double" => Some(Double),
         _ => {
-            if s.starts_with("uint8_t[") && s.ends_with("]") {
-                match s[("uint8_t[".len())..(s.len()-1)].parse::<u32>() {
-                    Ok(val) => Some(Buffer(val)),
-                    _ => None,
-                }
+            if s.ends_with("]") {
+                let start = s.find("[").unwrap();
+                let size = s[start+1..(s.len()-1)].parse::<usize>().unwrap();
+                let mtype = parse_type(&s[0..start]).unwrap();
+                Some(Array(Box::new(mtype), size))
             } else {
-                None
+                panic!("UNHANDLED {:?}", s);
             }
         }
+    }
+}
+
+impl MavType {
+    fn len(&self) -> usize {
+        use MavType::*;
+        match self.clone() {
+            UInt8MavlinkVersion | UInt8 | Int8 | Char => 1,
+            UInt16 | Int16 => 2,
+            UInt32 | Int32 | Float => 4,
+            UInt64 | Int64 | Double => 8,
+            Array(t, size) => t.len() * size,
+        }
+    }
+
+    fn order_len(&self) -> usize {
+        use MavType::*;
+        match self.clone() {
+            UInt8MavlinkVersion | UInt8 | Int8 | Char => 1,
+            UInt16 | Int16 => 2,
+            UInt32 | Int32 | Float => 4,
+            UInt64 | Int64 | Double => 8,
+            Array(t, size) => t.len(),
+        }
+    }
+
+    pub fn rust_type(&self) -> String {
+        use MavType::*;
+        match self.clone() {
+            UInt8 | UInt8MavlinkVersion => "u8".into(),
+            Int8 => "i8".into(),
+            Char => "u8".into(),
+            UInt16 => "u16".into(),
+            Int16 => "i16".into(),
+            UInt32 => "u32".into(),
+            Int32 => "i32".into(),
+            Float => "f32".into(),
+            UInt64 => "u64".into(),
+            Int64 => "i64".into(),
+            Double => "f64".into(),
+            // Buffer(n) => "u8".into(),
+            Array(t, size) => format!("Vec<{}> /* {} */", t.rust_type(), size),
+        }
+    }
+
+    pub fn compare(&self, other: &Self) -> Ordering {
+        let len = self.order_len();
+        (-(len as isize)).cmp(&(-(other.order_len() as isize)))
     }
 }
 
@@ -127,6 +180,7 @@ impl Default for MavField {
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum MavXmlElement {
+    Version,
     Mavlink,
     Include,
     Enums,
@@ -142,6 +196,7 @@ pub enum MavXmlElement {
 fn identify_element(s: &str) -> Option<MavXmlElement> {
     use MavXmlElement::*;
     match s {
+        "version" => Some(Version),
         "mavlink" => Some(Mavlink),
         "include" => Some(Include),
         "enums" => Some(Enums),
@@ -159,6 +214,7 @@ fn identify_element(s: &str) -> Option<MavXmlElement> {
 fn is_valid_parent(p: Option<MavXmlElement>, s: MavXmlElement) -> bool {
     use MavXmlElement::*;
     match s {
+        Version => p == Some(Mavlink),
         Mavlink => p == None,
         Include => p == Some(Mavlink),
         Enums => p == Some(Mavlink),
@@ -175,8 +231,8 @@ fn is_valid_parent(p: Option<MavXmlElement>, s: MavXmlElement) -> bool {
 #[derive(Debug, PartialEq, Clone)]
 pub struct MavProfile {
     pub includes: Vec<String>,
-    pub messages: HashMap<u8, MavMessage>,
-    pub enums: HashMap<String, MavEnum>,
+    pub messages: Vec<MavMessage>,
+    pub enums: Vec<MavEnum>,
 }
 
 pub fn parse_profile<'r>(file: Box<::std::io::Read>) -> MavProfile {
@@ -184,8 +240,8 @@ pub fn parse_profile<'r>(file: Box<::std::io::Read>) -> MavProfile {
 
     let mut profile = MavProfile {
         includes: vec![],
-        messages: HashMap::new(),
-        enums: HashMap::new(),
+        messages: vec![],
+        enums: vec![],
     };
 
     let mut field: MavField = Default::default();
@@ -317,6 +373,9 @@ pub fn parse_profile<'r>(file: Box<::std::io::Read>) -> MavProfile {
                     (Some(&Include), Some(&Mavlink)) => {
                         println!("TODO: include {:?}", s);
                     },
+                    (Some(&Version), Some(&Mavlink)) => {
+                        println!("TODO: version {:?}", s);
+                    },
                     data => {
                         panic!("unexpected text data {:?} reading {:?}", data, s);
                     },
@@ -332,10 +391,10 @@ pub fn parse_profile<'r>(file: Box<::std::io::Read>) -> MavProfile {
                     },
                     Some(&MavXmlElement::Message) => {
                         // println!("message: {:?}", message);
-                        profile.messages.insert(message.id, message.clone());
+                        profile.messages.push(message.clone());
                     },
                     Some(&MavXmlElement::Enum) => {
-                        profile.enums.insert(mavenum.name.clone(), mavenum.clone());
+                        profile.enums.push(mavenum.clone());
                     },
                     _ => (),
                 }

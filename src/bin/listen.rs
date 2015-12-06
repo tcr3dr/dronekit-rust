@@ -95,7 +95,7 @@ fn parse_mavlink_string(buf: &[u8]) -> String {
         .collect::<String>()
 }
 
-struct Pong {
+struct DkHandler {
     socket: TcpStream,
     buf: Vec<u8>,
     msg_id: u8,
@@ -134,7 +134,7 @@ impl Parameters {
     }
 }
 
-impl Pong {
+impl DkHandler {
     fn send(&mut self, data: DkMessage) -> (usize, Result<Option<usize>, ::std::io::Error>) {
         let mut pkt = MavPacket {
             seq: self.msg_id,
@@ -182,6 +182,14 @@ impl Pong {
                         target_system: 0,
                         target_component: 0,
                     }));
+
+                    let res = self.send(DkMessage::REQUEST_DATA_STREAM(REQUEST_DATA_STREAM_DATA {
+                        target_system: 0,
+                        target_component: 0,
+                        req_stream_id: 0,
+                        req_message_rate: 100,
+                        start_stop: 1,
+                    }));
                     // println!("start params {:?}", res);
                 }
             },
@@ -197,18 +205,24 @@ impl Pong {
                     println!("all params loaded {:?}", self.parameters);
                 }
             },
+            DkMessage::ATTITUDE(data) => {
+                println!("roll: {:?}\tpitch: {:?}\tyaw: {:?}", data.roll, data.pitch, data.yaw);
+            },
+            DkMessage::GLOBAL_POSITION_INT(data) => {
+                println!("lon: {:?}\tlat: {:?}\talt: {:?}", data.lon, data.lat, data.alt);
+            },
             _ => {
-                println!("dunno: {:?}", pkt);  
+                // println!("dunno: {:?}", pkt);
             },
         }
     }
 }
 
-impl mio::Handler for Pong {
+impl mio::Handler for DkHandler {
     type Timeout = ();
     type Message = ();
 
-    fn ready(&mut self, event_loop: &mut mio::EventLoop<Pong>, token: mio::Token, events: mio::EventSet) {
+    fn ready(&mut self, event_loop: &mut mio::EventLoop<DkHandler>, token: mio::Token, events: mio::EventSet) {
         match token {
             CLIENT => {
                 // Only receive readable events
@@ -257,7 +271,7 @@ impl mio::Handler for Pong {
                                         // println!("ok {:?}", pktbuf);
 
                                         if !packet.check_crc() {
-                                            println!("failed CRC!");
+                                            // println!("failed CRC!");
                                             start += i + 1;
                                             continue;
                                         }
@@ -314,7 +328,7 @@ fn run(address: SocketAddr) {
         mio::PollOpt::edge()).unwrap();
 
     println!("running pingpong socket");
-    event_loop.run(&mut Pong {
+    event_loop.run(&mut DkHandler {
         socket: socket,
         buf: vec![],
         msg_id: 0,

@@ -256,11 +256,11 @@ impl mio::Handler for Pong {
 
                                         // println!("ok {:?}", pktbuf);
 
-                                        // if !packet.check_crc() {
-                                        //     println!("failed CRC!");
-                                        //     start += i + 1;
-                                        //     continue;
-                                        // }
+                                        if !packet.check_crc() {
+                                            println!("failed CRC!");
+                                            start += i + 1;
+                                            continue;
+                                        }
                                     }
 
                                     // handle packet

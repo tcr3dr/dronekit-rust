@@ -1,5 +1,6 @@
 extern crate xml;
 extern crate byteorder;
+extern crate time;
 
 pub mod mavlink;
 

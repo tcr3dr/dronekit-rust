@@ -3,6 +3,7 @@ extern crate mio;
 extern crate bytes;
 extern crate crc16;
 extern crate byteorder;
+extern crate time;
 
 use dronekit::*;
 use dronekit::mavlink::*;
@@ -22,6 +23,7 @@ use std::net::SocketAddr;
 use std::collections::HashMap;
 use std::iter::repeat;
 use std::cmp::max;
+use std::thread;
 
 const CLIENT: mio::Token = mio::Token(0);
 
@@ -95,12 +97,32 @@ fn parse_mavlink_string(buf: &[u8]) -> String {
         .collect::<String>()
 }
 
+#[derive(Clone, Debug)]
+struct LocationGlobal {
+    alt: i32, lat: i32, lon: i32
+}
+
+#[derive(Clone, Debug)]
+struct Vehicle {
+    parameters: Parameters,
+    location_global: Option<LocationGlobal>,
+}
+
+impl Vehicle {
+    fn new() -> Vehicle {
+        Vehicle {
+            parameters: Parameters::new(),
+            location_global: None,
+        }
+    }
+}
+
 struct DkHandler {
     socket: TcpStream,
     buf: Vec<u8>,
     msg_id: u8,
     started: bool,
-    parameters: Parameters,
+    vehicle: Vehicle,
 }
 
 #[derive(Clone, Debug)]
@@ -132,9 +154,21 @@ impl Parameters {
     fn complete(&self) -> bool {
         self.indexes.iter().position(|x| x.is_none()).is_none()
     }
+
+    fn remaining(&self) -> usize {
+        self.indexes.iter().filter(|x| x.is_some()).count()
+    }
+
+    fn available(&self) -> usize {
+        self.indexes.iter().filter(|x| x.is_some()).count()
+    }
 }
 
 impl DkHandler {
+    fn tick(&mut self) {
+        println!("tick. location: {:?}", self.vehicle.location_global);
+    }
+
     fn send(&mut self, data: DkMessage) -> (usize, Result<Option<usize>, ::std::io::Error>) {
         let mut pkt = MavPacket {
             seq: self.msg_id,
@@ -198,18 +232,18 @@ impl DkHandler {
                 println!("<<< [{:?}] {:?}", data.severity, text);
             },
             DkMessage::PARAM_VALUE(data) => {
-                self.parameters.resize(data.param_count);
-                self.parameters.set(data.param_index, parse_mavlink_string(&data.param_id), data.param_value);
-                
-                if self.parameters.complete() {
-                    println!("all params loaded {:?}", self.parameters);
-                }
+                self.vehicle.parameters.resize(data.param_count);
+                self.vehicle.parameters.set(data.param_index, parse_mavlink_string(&data.param_id), data.param_value);
             },
             DkMessage::ATTITUDE(data) => {
-                println!("roll: {:?}\tpitch: {:?}\tyaw: {:?}", data.roll, data.pitch, data.yaw);
+                // println!("roll: {:?}\tpitch: {:?}\tyaw: {:?}", data.roll, data.pitch, data.yaw);
             },
             DkMessage::GLOBAL_POSITION_INT(data) => {
-                println!("lon: {:?}\tlat: {:?}\talt: {:?}", data.lon, data.lat, data.alt);
+                self.vehicle.location_global = Some(LocationGlobal {
+                    lat: data.lat,
+                    lon: data.lon,
+                    alt: data.alt,
+                });
             },
             _ => {
                 // println!("dunno: {:?}", pkt);
@@ -220,7 +254,7 @@ impl DkHandler {
 
 impl mio::Handler for DkHandler {
     type Timeout = ();
-    type Message = ();
+    type Message = time::Tm;
 
     fn ready(&mut self, event_loop: &mut mio::EventLoop<DkHandler>, token: mio::Token, events: mio::EventSet) {
         match token {
@@ -308,6 +342,10 @@ impl mio::Handler for DkHandler {
             _ => panic!("Received unknown token"),
         }
     }
+
+    fn notify(&mut self, event_loop: &mut mio::EventLoop<DkHandler>, msg: time::Tm) {
+        self.tick();
+    }
 }
 
 fn run(address: SocketAddr) {
@@ -327,13 +365,22 @@ fn run(address: SocketAddr) {
         mio::EventSet::readable(),
         mio::PollOpt::edge()).unwrap();
 
+    let sender = event_loop.channel();
+    // Send the notification from another thread
+    thread::spawn(move || {
+        loop {
+            let _ = sender.send(time::now());
+            thread::sleep_ms((1000.0 / 10.0) as u32);
+        }
+    });
+
     println!("running pingpong socket");
     event_loop.run(&mut DkHandler {
         socket: socket,
         buf: vec![],
         msg_id: 0,
         started: false,
-        parameters: Parameters::new(),
+        vehicle: Vehicle::new(),
     });
 }
 

@@ -19,6 +19,9 @@ use bytes::Buf;
 use std::{mem, str};
 use std::io::Cursor;
 use std::net::SocketAddr;
+use std::collections::HashMap;
+use std::iter::repeat;
+use std::cmp::max;
 
 const CLIENT: mio::Token = mio::Token(0);
 
@@ -64,8 +67,8 @@ impl MavPacket {
 
     fn encode(&self) -> Vec<u8> {
         let mut pkt = self.encode_nocrc();
-        pkt.push((self.checksum >> 8) as u8);
         pkt.push((self.checksum & 0xff) as u8);
+        pkt.push((self.checksum >> 8) as u8);
         pkt
     }
 
@@ -85,11 +88,50 @@ impl MavPacket {
     }
 }
 
+fn parse_mavlink_string(buf: &[u8]) -> String {
+    buf.iter()
+        .take_while(|a| **a != 0)
+        .map(|x| *x as char)
+        .collect::<String>()
+}
+
 struct Pong {
     socket: TcpStream,
     buf: Vec<u8>,
     msg_id: u8,
     started: bool,
+    parameters: Parameters,
+}
+
+#[derive(Clone, Debug)]
+struct Parameters {
+    values: HashMap<String, f32>,
+    indexes: Vec<Option<String>>
+}
+
+impl Parameters {
+    fn new() -> Parameters {
+        Parameters {
+            values: HashMap::new(),
+            indexes: vec![],
+        }
+    }
+
+    fn resize(&mut self, len: u16) {
+        if self.indexes.len() != len as usize {
+            self.values = HashMap::new();
+            self.indexes = repeat(None).take(len as usize).collect();
+        }
+    }
+
+    fn set(&mut self, index: u16, name: String, value: f32) {
+        self.values.insert(name.clone(), value);
+        self.indexes[index as usize] = Some(name);
+    }
+
+    fn complete(&self) -> bool {
+        self.indexes.iter().position(|x| x.is_none()).is_none()
+    }
 }
 
 impl Pong {
@@ -108,7 +150,7 @@ impl Pong {
 
         self.msg_id = self.msg_id.wrapping_add(1);
 
-        println!(">>> {:?}", out);
+        // println!(">>> {:?}", out);
         let mut cur = Cursor::new(out);
         (outlen, self.socket.try_write_buf(&mut cur))
     }
@@ -140,15 +182,20 @@ impl Pong {
                         target_system: 0,
                         target_component: 0,
                     }));
-                    println!("start params {:?}", res);
+                    // println!("start params {:?}", res);
                 }
             },
             DkMessage::STATUSTEXT(data) => {
-                let text = data.text.iter()
-                    .take_while(|a| **a != 0)
-                    .map(|x| *x as char)
-                    .collect::<String>();
+                let text = parse_mavlink_string(&data.text);
                 println!("<<< [{:?}] {:?}", data.severity, text);
+            },
+            DkMessage::PARAM_VALUE(data) => {
+                self.parameters.resize(data.param_count);
+                self.parameters.set(data.param_index, parse_mavlink_string(&data.param_id), data.param_value);
+                
+                if self.parameters.complete() {
+                    println!("all params loaded {:?}", self.parameters);
+                }
             },
             _ => {
                 println!("dunno: {:?}", pkt);  
@@ -272,6 +319,7 @@ fn run(address: SocketAddr) {
         buf: vec![],
         msg_id: 0,
         started: false,
+        parameters: Parameters::new(),
     });
 }
 

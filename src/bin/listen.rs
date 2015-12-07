@@ -24,6 +24,7 @@ use std::collections::HashMap;
 use std::iter::repeat;
 use std::cmp::max;
 use std::thread;
+use std::sync::mpsc::{channel, Sender, Receiver};
 
 const CLIENT: mio::Token = mio::Token(0);
 
@@ -120,9 +121,7 @@ impl Vehicle {
 struct DkHandler {
     socket: TcpStream,
     buf: Vec<u8>,
-    msg_id: u8,
-    started: bool,
-    vehicle: Vehicle,
+    vehicle_tx: Sender<DkMessage>,
 }
 
 #[derive(Clone, Debug)]
@@ -164,12 +163,19 @@ impl Parameters {
     }
 }
 
-impl DkHandler {
+struct DkThread {
+    vehicle: Vehicle,
+    vehicle_tx: mio::Sender<Vec<u8>>,
+    msg_id: u8,
+    started: bool,
+}
+
+impl DkThread {
     fn tick(&mut self) {
         println!("tick. location: {:?}", self.vehicle.location_global);
     }
 
-    fn send(&mut self, data: DkMessage) -> (usize, Result<Option<usize>, ::std::io::Error>) {
+    fn send(&mut self, data: DkMessage) {
         let mut pkt = MavPacket {
             seq: self.msg_id,
             system_id: 255,
@@ -180,19 +186,20 @@ impl DkHandler {
         };
         pkt.update_crc();
         let out = pkt.encode();
-        let outlen = out.len();
+        // let outlen = out.len();
 
         self.msg_id = self.msg_id.wrapping_add(1);
 
         // println!(">>> {:?}", out);
-        let mut cur = Cursor::new(out);
-        (outlen, self.socket.try_write_buf(&mut cur))
+        // let mut cur = Cursor::new(out);
+        self.vehicle_tx.send(out);
+        // (outlen, self.socket.try_write_buf(&mut cur))
     }
 
     fn on_message(&mut self, pkt: DkMessage) {
         match pkt {
             DkMessage::HEARTBEAT(..) => {
-                let (outlen, res) = self.send(DkMessage::HEARTBEAT(HEARTBEAT_DATA {
+                self.send(DkMessage::HEARTBEAT(HEARTBEAT_DATA {
                     custom_mode: 0,
                     mavtype: 6,
                     autopilot: 8,
@@ -201,23 +208,23 @@ impl DkHandler {
                     mavlink_version: 0x3,
                 }));
 
-                if let Ok(Some(n)) = res {
-                    if n != outlen {
-                        println!("ERROR: only wrote {:?}", n);
-                    }
-                } else {
-                    println!("ERROR: didnt write anything");
-                }
+                // if let Ok(Some(n)) = res {
+                //     if n != outlen {
+                //         println!("ERROR: only wrote {:?}", n);
+                //     }
+                // } else {
+                //     println!("ERROR: didnt write anything");
+                // }
 
                 if !self.started {
                     self.started = true;
 
-                    let res = self.send(DkMessage::PARAM_REQUEST_LIST(PARAM_REQUEST_LIST_DATA {
+                    self.send(DkMessage::PARAM_REQUEST_LIST(PARAM_REQUEST_LIST_DATA {
                         target_system: 0,
                         target_component: 0,
                     }));
 
-                    let res = self.send(DkMessage::REQUEST_DATA_STREAM(REQUEST_DATA_STREAM_DATA {
+                    self.send(DkMessage::REQUEST_DATA_STREAM(REQUEST_DATA_STREAM_DATA {
                         target_system: 0,
                         target_component: 0,
                         req_stream_id: 0,
@@ -254,7 +261,7 @@ impl DkHandler {
 
 impl mio::Handler for DkHandler {
     type Timeout = ();
-    type Message = time::Tm;
+    type Message = Vec<u8>;
 
     fn ready(&mut self, event_loop: &mut mio::EventLoop<DkHandler>, token: mio::Token, events: mio::EventSet) {
         match token {
@@ -313,7 +320,7 @@ impl mio::Handler for DkHandler {
 
                                     // handle packet
                                     if let Some(pkt) = packet.parse() {
-                                        self.on_message(pkt);
+                                        self.vehicle_tx.send(pkt);
                                     }
                                     
                                     // change this
@@ -343,8 +350,8 @@ impl mio::Handler for DkHandler {
         }
     }
 
-    fn notify(&mut self, event_loop: &mut mio::EventLoop<DkHandler>, msg: time::Tm) {
-        self.tick();
+    fn notify(&mut self, event_loop: &mut mio::EventLoop<DkHandler>, msg: Vec<u8>) {
+        self.socket.try_write_buf(&mut Cursor::new(msg));
     }
 }
 
@@ -365,23 +372,39 @@ fn run(address: SocketAddr) {
         mio::EventSet::readable(),
         mio::PollOpt::edge()).unwrap();
 
-    let sender = event_loop.channel();
-    // Send the notification from another thread
+    // let sender = event_loop.channel();
+    // // Send the notification from another thread
+
+    let (tx, rx) = channel();
+    let vehicle_tx = event_loop.channel();
+
     thread::spawn(move || {
+        let mut t = DkThread {
+            vehicle: Vehicle::new(),
+            vehicle_tx: vehicle_tx,
+            msg_id: 0,
+            started: false,
+        };
         loop {
-            let _ = sender.send(time::now());
             thread::sleep_ms((1000.0 / 10.0) as u32);
+
+            for i in 0..256 {
+                if let Ok(pkt) = rx.try_recv() {
+                    t.on_message(pkt);
+                }
+            }
+            t.tick();
         }
     });
 
-    println!("running pingpong socket");
-    event_loop.run(&mut DkHandler {
-        socket: socket,
-        buf: vec![],
-        msg_id: 0,
-        started: false,
-        vehicle: Vehicle::new(),
-    });
+    thread::spawn(move || {
+        println!("running pingpong socket");
+        event_loop.run(&mut DkHandler {
+            socket: socket,
+            buf: vec![],
+            vehicle_tx: tx,
+        });
+    }).join();
 }
 
 pub fn main() {

@@ -17,6 +17,7 @@ use bytes::Buf;
 use std::{mem, str};
 use std::io::Cursor;
 use std::net::SocketAddr;
+use std::sync::mpsc::channel;
 
 pub fn extra_crc(msg: &MavMessage) -> u8 {
     // calculate a 8-bit checksum of the key fields of a message, so we

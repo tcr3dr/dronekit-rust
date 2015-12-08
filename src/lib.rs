@@ -1,8 +1,12 @@
 extern crate xml;
 extern crate byteorder;
 extern crate time;
+extern crate mio;
+extern crate bytes;
+extern crate crc16;
 
 pub mod mavlink;
+pub mod vehicle;
 
 use std::fs::File;
 use std::io::BufReader;

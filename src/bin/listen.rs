@@ -3,12 +3,20 @@ extern crate dronekit;
 use std::thread;
 use dronekit::vehicle::{Vehicle, connect};
 
-pub fn main() {
-    let mut vehicle = Vehicle::new(connect("127.0.0.1:5760".parse().unwrap()));
+fn tick(vehicle: &mut Vehicle) {
+    println!("tick. location: {:?}", vehicle.location_global);
+}
 
+fn vehicle_loop<F>(mut vehicle: Vehicle, fps: i32, func: F)
+    where F: Fn(&mut Vehicle) {
     loop {
-        thread::sleep_ms((1000.0 / 10.0) as u32);
+        thread::sleep_ms((1000.0 / (fps as f32)) as u32);
         vehicle.update();
-        println!("tick. location: {:?}", vehicle.location_global);
+        func(&mut vehicle);
     }
+}
+
+fn main() {
+    let mut vehicle = Vehicle::new(connect("127.0.0.1:5760".parse().unwrap()));
+    vehicle_loop(vehicle, 10, tick);
 }

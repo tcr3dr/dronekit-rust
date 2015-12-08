@@ -297,6 +297,7 @@ impl mio::Handler for DkHandler {
                         unimplemented!();
                     }
                     Ok(Some(n)) => {
+                        // crc16::State::<crc16::MCRF4XX>::calculate()
                         let mut start: usize = 0;
                         loop {
                             match self.buf[start..].iter().position(|&x| x == 0xfe) {
@@ -335,11 +336,11 @@ impl mio::Handler for DkHandler {
                                     start += i + 8 + len;
                                 },
                                 None => {
-                                    self.buf = self.buf.split_off(start);
                                     break;
                                 }
                             }
                         }
+                        self.buf = self.buf.split_off(start);
 
                         // Re-register the socket with the event loop. The current
                         // state is used to determine whether we are currently reading

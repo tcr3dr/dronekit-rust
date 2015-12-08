@@ -103,17 +103,90 @@ struct LocationGlobal {
     alt: i32, lat: i32, lon: i32
 }
 
-#[derive(Clone, Debug)]
 struct Vehicle {
     parameters: Parameters,
     location_global: Option<LocationGlobal>,
+    connection: VehicleConnection,
 }
 
 impl Vehicle {
-    fn new() -> Vehicle {
+    fn new(conn: VehicleConnection) -> Vehicle {
         Vehicle {
             parameters: Parameters::new(),
             location_global: None,
+            connection: conn,
+        }
+    }
+
+    fn update(&mut self) {
+        for i in 0..256 {
+            if let Ok(pkt) = self.connection.rx.try_recv() {
+                self.on_message(pkt);
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn on_message(&mut self, pkt: DkMessage) {
+        match pkt {
+            DkMessage::HEARTBEAT(..) => {
+                self.connection.send(DkMessage::HEARTBEAT(HEARTBEAT_DATA {
+                    custom_mode: 0,
+                    mavtype: 6,
+                    autopilot: 8,
+                    base_mode: 0,
+                    system_status: 0,
+                    mavlink_version: 0x3,
+                }));
+
+                // if let Ok(Some(n)) = res {
+                //     if n != outlen {
+                //         println!("ERROR: only wrote {:?}", n);
+                //     }
+                // } else {
+                //     println!("ERROR: didnt write anything");
+                // }
+
+                if !self.connection.started {
+                    self.connection.started = true;
+
+                    self.connection.send(DkMessage::PARAM_REQUEST_LIST(PARAM_REQUEST_LIST_DATA {
+                        target_system: 0,
+                        target_component: 0,
+                    }));
+
+                    self.connection.send(DkMessage::REQUEST_DATA_STREAM(REQUEST_DATA_STREAM_DATA {
+                        target_system: 0,
+                        target_component: 0,
+                        req_stream_id: 0,
+                        req_message_rate: 100,
+                        start_stop: 1,
+                    }));
+                    // println!("start params {:?}", res);
+                }
+            },
+            DkMessage::STATUSTEXT(data) => {
+                let text = parse_mavlink_string(&data.text);
+                println!("<<< [{:?}] {:?}", data.severity, text);
+            },
+            DkMessage::PARAM_VALUE(data) => {
+                self.parameters.resize(data.param_count);
+                self.parameters.set(data.param_index, parse_mavlink_string(&data.param_id), data.param_value);
+            },
+            DkMessage::ATTITUDE(data) => {
+                // println!("roll: {:?}\tpitch: {:?}\tyaw: {:?}", data.roll, data.pitch, data.yaw);
+            },
+            DkMessage::GLOBAL_POSITION_INT(data) => {
+                self.location_global = Some(LocationGlobal {
+                    lat: data.lat,
+                    lon: data.lon,
+                    alt: data.alt,
+                });
+            },
+            _ => {
+                // println!("dunno: {:?}", pkt);
+            },
         }
     }
 }
@@ -163,17 +236,17 @@ impl Parameters {
     }
 }
 
-struct DkThread {
-    vehicle: Vehicle,
-    vehicle_tx: mio::Sender<Vec<u8>>,
+struct VehicleConnection {
+    tx: mio::Sender<Vec<u8>>,
+    rx: Receiver<DkMessage>,
     msg_id: u8,
     started: bool,
 }
 
-impl DkThread {
-    fn tick(&mut self) {
-        println!("tick. location: {:?}", self.vehicle.location_global);
-    }
+impl VehicleConnection {
+    // fn tick(&mut self) {
+    //     println!("tick. location: {:?}", self.vehicle.location_global);
+    // }
 
     fn send(&mut self, data: DkMessage) {
         let mut pkt = MavPacket {
@@ -192,70 +265,8 @@ impl DkThread {
 
         // println!(">>> {:?}", out);
         // let mut cur = Cursor::new(out);
-        self.vehicle_tx.send(out);
+        self.tx.send(out);
         // (outlen, self.socket.try_write_buf(&mut cur))
-    }
-
-    fn on_message(&mut self, pkt: DkMessage) {
-        match pkt {
-            DkMessage::HEARTBEAT(..) => {
-                self.send(DkMessage::HEARTBEAT(HEARTBEAT_DATA {
-                    custom_mode: 0,
-                    mavtype: 6,
-                    autopilot: 8,
-                    base_mode: 0,
-                    system_status: 0,
-                    mavlink_version: 0x3,
-                }));
-
-                // if let Ok(Some(n)) = res {
-                //     if n != outlen {
-                //         println!("ERROR: only wrote {:?}", n);
-                //     }
-                // } else {
-                //     println!("ERROR: didnt write anything");
-                // }
-
-                if !self.started {
-                    self.started = true;
-
-                    self.send(DkMessage::PARAM_REQUEST_LIST(PARAM_REQUEST_LIST_DATA {
-                        target_system: 0,
-                        target_component: 0,
-                    }));
-
-                    self.send(DkMessage::REQUEST_DATA_STREAM(REQUEST_DATA_STREAM_DATA {
-                        target_system: 0,
-                        target_component: 0,
-                        req_stream_id: 0,
-                        req_message_rate: 100,
-                        start_stop: 1,
-                    }));
-                    // println!("start params {:?}", res);
-                }
-            },
-            DkMessage::STATUSTEXT(data) => {
-                let text = parse_mavlink_string(&data.text);
-                println!("<<< [{:?}] {:?}", data.severity, text);
-            },
-            DkMessage::PARAM_VALUE(data) => {
-                self.vehicle.parameters.resize(data.param_count);
-                self.vehicle.parameters.set(data.param_index, parse_mavlink_string(&data.param_id), data.param_value);
-            },
-            DkMessage::ATTITUDE(data) => {
-                // println!("roll: {:?}\tpitch: {:?}\tyaw: {:?}", data.roll, data.pitch, data.yaw);
-            },
-            DkMessage::GLOBAL_POSITION_INT(data) => {
-                self.vehicle.location_global = Some(LocationGlobal {
-                    lat: data.lat,
-                    lon: data.lon,
-                    alt: data.alt,
-                });
-            },
-            _ => {
-                // println!("dunno: {:?}", pkt);
-            },
-        }
     }
 }
 
@@ -355,7 +366,7 @@ impl mio::Handler for DkHandler {
     }
 }
 
-fn run(address: SocketAddr) {
+fn connect(address: SocketAddr) -> VehicleConnection {
     // Create a new event loop, panic if this fails.
     let socket = match TcpStream::connect(&address) {
         Ok(socket) => socket,
@@ -379,32 +390,20 @@ fn run(address: SocketAddr) {
     let vehicle_tx = event_loop.channel();
 
     thread::spawn(move || {
-        let mut t = DkThread {
-            vehicle: Vehicle::new(),
-            vehicle_tx: vehicle_tx,
-            msg_id: 0,
-            started: false,
-        };
-        loop {
-            thread::sleep_ms((1000.0 / 10.0) as u32);
-
-            for i in 0..256 {
-                if let Ok(pkt) = rx.try_recv() {
-                    t.on_message(pkt);
-                }
-            }
-            t.tick();
-        }
-    });
-
-    thread::spawn(move || {
         println!("running pingpong socket");
         event_loop.run(&mut DkHandler {
             socket: socket,
             buf: vec![],
             vehicle_tx: tx,
         });
-    }).join();
+    });
+
+    return VehicleConnection {
+        tx: vehicle_tx,
+        rx: rx,
+        msg_id: 0,
+        started: false,
+    };
 }
 
 pub fn main() {
@@ -412,5 +411,11 @@ pub fn main() {
     let file = BufReader::new(file);
     let profile = parse_profile(Box::new(file));
 
-    run("127.0.0.1:5760".parse().unwrap());
+    let mut vehicle = Vehicle::new(connect("127.0.0.1:5760".parse().unwrap()));
+
+    loop {
+        thread::sleep_ms((1000.0 / 10.0) as u32);
+        vehicle.update();
+        println!("tick. location: {:?}", vehicle.location_global);
+    }
 }

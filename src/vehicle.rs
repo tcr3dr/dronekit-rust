@@ -20,8 +20,13 @@ use std::iter::repeat;
 use std::cmp::max;
 use std::thread;
 use std::sync::mpsc::{channel, Sender, Receiver};
+use std::cell::RefCell;
+use std::rc::Rc;
+use eventual::{Future, Async};
 
 const CLIENT: mio::Token = mio::Token(0);
+
+pub type UpdaterList = Rc<RefCell<Vec<Box<FnMut(&Vehicle) -> bool>>>>;
 
 #[derive(Debug)]
 struct MavPacket {
@@ -100,24 +105,51 @@ pub struct LocationGlobal {
     pub lon: i32,
 }
 
+// #[derive(Clone, Debug)]
 pub struct Vehicle {
     pub parameters: Parameters,
     pub location_global: Option<LocationGlobal>,
-    connection: VehicleConnection,
+    connection: Rc<RefCell<VehicleConnection>>,
+    updaters: UpdaterList,
 }
+
 
 impl Vehicle {
     pub fn new(conn: VehicleConnection) -> Vehicle {
+        let updaters = Rc::new(RefCell::new(vec![]));
+        let connection = Rc::new(RefCell::new(conn));
         Vehicle {
-            parameters: Parameters::new(),
+            parameters: Parameters::new(updaters.clone(), connection.clone()),
             location_global: None,
-            connection: conn,
+            connection: connection,
+            updaters: updaters,
         }
     }
 
-    pub fn update(&mut self) {
-        for i in 0..256 {
-            if let Ok(pkt) = self.connection.rx.try_recv() {
+    pub fn await(&mut self, f: Future<(), ()>) {
+        while !f.is_ready() {
+            self.update(true);
+        }
+    }
+
+    pub fn update(&mut self, wait: bool) {
+        if wait {
+            let val = {
+                self.connection.borrow().rx.recv()
+            };
+            if let Ok(pkt) = val {
+                self.on_message(pkt);
+            } else {
+                return;
+            }
+        }
+
+        // Get remaining queued packets
+        for i in (if wait { 1 } else { 0 })..256 {
+            let val = {
+                self.connection.borrow().rx.try_recv()
+            };
+            if let Ok(pkt) = val {
                 self.on_message(pkt);
             } else {
                 break;
@@ -128,7 +160,7 @@ impl Vehicle {
     fn on_message(&mut self, pkt: DkMessage) {
         match pkt {
             DkMessage::HEARTBEAT(..) => {
-                self.connection.send(DkMessage::HEARTBEAT(HEARTBEAT_DATA {
+                self.connection.borrow_mut().send(DkMessage::HEARTBEAT(HEARTBEAT_DATA {
                     custom_mode: 0,
                     mavtype: 6,
                     autopilot: 8,
@@ -145,15 +177,15 @@ impl Vehicle {
                 //     println!("ERROR: didnt write anything");
                 // }
 
-                if !self.connection.started {
-                    self.connection.started = true;
+                if !self.connection.borrow().started {
+                    self.connection.borrow_mut().started = true;
 
-                    self.connection.send(DkMessage::PARAM_REQUEST_LIST(PARAM_REQUEST_LIST_DATA {
+                    self.connection.borrow_mut().send(DkMessage::PARAM_REQUEST_LIST(PARAM_REQUEST_LIST_DATA {
                         target_system: 0,
                         target_component: 0,
                     }));
 
-                    self.connection.send(DkMessage::REQUEST_DATA_STREAM(REQUEST_DATA_STREAM_DATA {
+                    self.connection.borrow_mut().send(DkMessage::REQUEST_DATA_STREAM(REQUEST_DATA_STREAM_DATA {
                         target_system: 0,
                         target_component: 0,
                         req_stream_id: 0,
@@ -169,7 +201,7 @@ impl Vehicle {
             },
             DkMessage::PARAM_VALUE(data) => {
                 self.parameters.resize(data.param_count);
-                self.parameters.set(data.param_index, parse_mavlink_string(&data.param_id), data.param_value);
+                self.parameters.assign(data.param_index, &parse_mavlink_string(&data.param_id), data.param_value);
             },
             DkMessage::ATTITUDE(data) => {
                 // println!("roll: {:?}\tpitch: {:?}\tyaw: {:?}", data.roll, data.pitch, data.yaw);
@@ -185,6 +217,14 @@ impl Vehicle {
                 // println!("dunno: {:?}", pkt);
             },
         }
+
+        let mut ups = self.updaters.borrow_mut().split_off(0);
+        for mut x in ups.into_iter() {
+            if x(self) {
+                self.updaters.borrow_mut().push(x);
+            }
+        } //;.filter(|func| func(self)).collect();
+        // self.updaters.borrow_mut().extend(ups2);
     }
 }
 
@@ -194,34 +234,70 @@ struct DkHandler {
     vehicle_tx: Sender<DkMessage>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Parameters {
     values: HashMap<String, f32>,
-    indexes: Vec<Option<String>>
+    indexes: Vec<Option<String>>,
+    connection: Rc<RefCell<VehicleConnection>>,
+    updaters: UpdaterList,
 }
 
 impl Parameters {
-    pub fn new() -> Parameters {
+    pub fn new(updaters: UpdaterList, connection: Rc<RefCell<VehicleConnection>>) -> Parameters {
         Parameters {
             values: HashMap::new(),
             indexes: vec![],
+            updaters: updaters,
+            connection: connection,
         }
     }
 
-    pub fn resize(&mut self, len: u16) {
+    fn resize(&mut self, len: u16) {
         if self.indexes.len() != len as usize {
             self.values = HashMap::new();
             self.indexes = repeat(None).take(len as usize).collect();
         }
     }
 
-    pub fn set(&mut self, index: u16, name: String, value: f32) {
-        self.values.insert(name.clone(), value);
-        self.indexes[index as usize] = Some(name);
+    fn assign(&mut self, index: u16, name: &str, value: f32) {
+        self.values.insert(name.into(), value);
+        if index != 65535 {
+            self.indexes[index as usize] = Some(name.into());
+        }
+    }
+
+    pub fn get(&self, name: &str) -> Option<&f32> {
+        self.values.get(name)
+    }
+
+    pub fn set(&mut self, name: &str, value: f32) -> Future<(), ()> {
+        let (tx, future) = Future::<(), ()>::pair();
+        let name2: String = name.clone().into();
+        let mut tx2 = Some(tx);
+        let outpkt = DkMessage::PARAM_SET(PARAM_SET_DATA {
+            param_value: value,
+            target_system: 0,
+            target_component: 0,
+            param_id: name.chars().chain(repeat(0 as char)).take(16).map(|x| x as u8).collect(),
+            param_type: 0,
+        });
+        self.connection.borrow_mut().send(outpkt);
+        self.updaters.borrow_mut().push(Box::new(move |v| {
+            if let Some(val) = v.parameters.get(&name2) {
+                if *val == value {
+                    if let Some(tx) = tx2.take() {
+                        tx.complete(());
+                    }
+                    return false;
+                }
+            }
+            true
+        }));
+        future
     }
 
     pub fn complete(&self) -> bool {
-        self.indexes.iter().position(|x| x.is_none()).is_none()
+        self.indexes.len() != 0 && self.indexes.iter().position(|x| x.is_none()).is_none()
     }
 
     pub fn remaining(&self) -> usize {

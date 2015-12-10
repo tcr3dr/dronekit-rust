@@ -1,7 +1,9 @@
 extern crate dronekit;
+extern crate eventual;
 
 use std::thread;
 use dronekit::vehicle::{Vehicle, connect};
+use eventual::Async;
 
 fn tick(vehicle: &mut Vehicle) {
     println!("tick. location: {:?}", vehicle.location_global);
@@ -9,11 +11,25 @@ fn tick(vehicle: &mut Vehicle) {
 
 fn vehicle_loop<F>(mut vehicle: Vehicle, fps: i32, func: F)
     where F: Fn(&mut Vehicle) {
-    loop {
-        thread::sleep_ms((1000.0 / (fps as f32)) as u32);
-        vehicle.update();
-        func(&mut vehicle);
+    // loop {
+    //     thread::sleep_ms((1000.0 / (fps as f32)) as u32);
+    //     vehicle.update(false);
+    //     func(&mut vehicle);
+    // }
+
+    while !vehicle.parameters.complete() {
+        vehicle.update(true);
     }
+
+    println!("params {:?}", vehicle.parameters.get("FS_EKF_THRESH"));
+    
+    let s = vehicle.parameters.set("FS_EKF_THRESH", 30.0);
+    vehicle.await(s);
+    println!("params {:?}", vehicle.parameters.get("FS_EKF_THRESH"));
+
+    let s = vehicle.parameters.set("FS_EKF_THRESH", 20.0);
+    vehicle.await(s);
+    println!("params {:?}", vehicle.parameters.get("FS_EKF_THRESH"));
 }
 
 fn main() {

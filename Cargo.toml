@@ -10,3 +10,6 @@ bytes = "*"
 crc16 = "0.3.3"
 byteorder = "0.4.2"
 time = "0.1"
+
+[dependencies.eventual]
+git = "https://github.com/carllerche/eventual"

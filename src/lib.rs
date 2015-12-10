@@ -4,6 +4,7 @@ extern crate time;
 extern crate mio;
 extern crate bytes;
 extern crate crc16;
+extern crate eventual;
 
 pub mod mavlink;
 pub mod vehicle;

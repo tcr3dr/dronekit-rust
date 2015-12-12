@@ -23,10 +23,11 @@ use std::sync::mpsc::{channel, Sender, Receiver};
 use std::cell::RefCell;
 use std::rc::Rc;
 use eventual::{Future, Async};
+use std::sync::RwLock;
 
 const CLIENT: mio::Token = mio::Token(0);
 
-pub type UpdaterList = Rc<RefCell<Vec<Box<FnMut(&Vehicle) -> bool>>>>;
+pub type UpdaterList = Vec<Box<FnMut(DkMessage) -> bool>>;
 
 #[derive(Debug)]
 struct MavPacket {
@@ -110,25 +111,16 @@ pub struct Vehicle {
     pub parameters: Parameters,
     pub location_global: Option<LocationGlobal>,
     connection: Rc<RefCell<VehicleConnection>>,
-    updaters: UpdaterList,
 }
 
 
 impl Vehicle {
     pub fn new(conn: VehicleConnection) -> Vehicle {
-        let updaters = Rc::new(RefCell::new(vec![]));
         let connection = Rc::new(RefCell::new(conn));
         Vehicle {
-            parameters: Parameters::new(updaters.clone(), connection.clone()),
+            parameters: Parameters::new(connection.clone()),
             location_global: None,
             connection: connection,
-            updaters: updaters,
-        }
-    }
-
-    pub fn await(&mut self, f: Future<(), ()>) {
-        while !f.is_ready() {
-            self.update(true);
         }
     }
 
@@ -145,7 +137,7 @@ impl Vehicle {
         }
 
         // Get remaining queued packets
-        for i in (if wait { 1 } else { 0 })..256 {
+        loop {
             let val = {
                 self.connection.borrow().rx.try_recv()
             };
@@ -158,6 +150,7 @@ impl Vehicle {
     }
 
     fn on_message(&mut self, pkt: DkMessage) {
+        let pkt2 = pkt.clone();
         match pkt {
             DkMessage::HEARTBEAT(..) => {
                 self.connection.borrow_mut().send(DkMessage::HEARTBEAT(HEARTBEAT_DATA {
@@ -217,21 +210,7 @@ impl Vehicle {
                 // println!("dunno: {:?}", pkt);
             },
         }
-
-        let mut ups = self.updaters.borrow_mut().split_off(0);
-        for mut x in ups.into_iter() {
-            if x(self) {
-                self.updaters.borrow_mut().push(x);
-            }
-        } //;.filter(|func| func(self)).collect();
-        // self.updaters.borrow_mut().extend(ups2);
     }
-}
-
-struct DkHandler {
-    socket: TcpStream,
-    buf: Vec<u8>,
-    vehicle_tx: Sender<DkMessage>,
 }
 
 #[derive(Clone)]
@@ -239,15 +218,13 @@ pub struct Parameters {
     values: HashMap<String, f32>,
     indexes: Vec<Option<String>>,
     connection: Rc<RefCell<VehicleConnection>>,
-    updaters: UpdaterList,
 }
 
 impl Parameters {
-    pub fn new(updaters: UpdaterList, connection: Rc<RefCell<VehicleConnection>>) -> Parameters {
+    pub fn new(connection: Rc<RefCell<VehicleConnection>>) -> Parameters {
         Parameters {
             values: HashMap::new(),
             indexes: vec![],
-            updaters: updaters,
             connection: connection,
         }
     }
@@ -282,17 +259,19 @@ impl Parameters {
             param_type: 0,
         });
         self.connection.borrow_mut().send(outpkt);
-        self.updaters.borrow_mut().push(Box::new(move |v| {
-            if let Some(val) = v.parameters.get(&name2) {
-                if *val == value {
-                    if let Some(tx) = tx2.take() {
-                        tx.complete(());
+        self.connection.borrow_mut().tx.send(DkHandlerMessage::TxWatcher(Box::new(move |msg| {
+            if let DkMessage::PARAM_VALUE(data) = msg {
+                if parse_mavlink_string(&data.param_id) == name2 {
+                    if data.param_value == value {
+                        if let Some(tx) = tx2.take() {
+                            tx.complete(());
+                        }
+                        return false;
                     }
-                    return false;
                 }
             }
             true
-        }));
+        })));
         future
     }
 
@@ -309,43 +288,21 @@ impl Parameters {
     }
 }
 
-pub struct VehicleConnection {
-    tx: mio::Sender<Vec<u8>>,
-    rx: Receiver<DkMessage>,
-    msg_id: u8,
-    started: bool,
+struct DkHandler {
+    socket: TcpStream,
+    buf: Vec<u8>,
+    vehicle_tx: Sender<DkMessage>,
+    watchers: UpdaterList,
 }
 
-impl VehicleConnection {
-    // fn tick(&mut self) {
-    //     println!("tick. location: {:?}", self.vehicle.location_global);
-    // }
-
-    fn send(&mut self, data: DkMessage) {
-        let mut pkt = MavPacket {
-            seq: self.msg_id,
-            system_id: 255,
-            component_id: 0,
-            message_id: data.message_id(),
-            data: data.serialize(),
-            checksum: 0,
-        };
-        pkt.update_crc();
-        let out = pkt.encode();
-        // let outlen = out.len();
-
-        self.msg_id = self.msg_id.wrapping_add(1);
-
-        // println!(">>> {:?}", out);
-        // let mut cur = Cursor::new(out);
-        self.tx.send(out);
-        // (outlen, self.socket.try_write_buf(&mut cur))
-    }
+enum DkHandlerMessage {
+    TxMessage(Vec<u8>),
+    TxWatcher(Box<FnMut(DkMessage) -> bool + Send>)
 }
 
 impl mio::Handler for DkHandler {
     type Timeout = ();
-    type Message = Vec<u8>;
+    type Message = DkHandlerMessage;
 
     fn ready(&mut self, event_loop: &mut mio::EventLoop<DkHandler>, token: mio::Token, events: mio::EventSet) {
         match token {
@@ -405,7 +362,16 @@ impl mio::Handler for DkHandler {
 
                                     // handle packet
                                     if let Some(pkt) = packet.parse() {
+                                        let pkt2 = pkt.clone();
                                         self.vehicle_tx.send(pkt);
+
+                                        let mut ups = self.watchers.split_off(0);
+                                        for mut x in ups.into_iter() {
+                                            if x(pkt2.clone()) {
+                                                self.watchers.push(x);
+                                            }
+                                        } //;.filter(|func| func(self)).collect();
+                                        // self.watchers.borrow_mut().extend(ups2);
                                     }
                                     
                                     // change this
@@ -435,8 +401,49 @@ impl mio::Handler for DkHandler {
         }
     }
 
-    fn notify(&mut self, event_loop: &mut mio::EventLoop<DkHandler>, msg: Vec<u8>) {
-        self.socket.try_write_buf(&mut Cursor::new(msg));
+    fn notify(&mut self, event_loop: &mut mio::EventLoop<DkHandler>, message: DkHandlerMessage) {
+        match message {
+            DkHandlerMessage::TxMessage(msg) => {
+                self.socket.try_write_buf(&mut Cursor::new(msg));
+            }
+            DkHandlerMessage::TxWatcher(func) => {
+                self.watchers.push(func);
+            }
+        }
+    }
+}
+
+pub struct VehicleConnection {
+    tx: mio::Sender<DkHandlerMessage>,
+    rx: Receiver<DkMessage>,
+    msg_id: u8,
+    started: bool,
+}
+
+impl VehicleConnection {
+    // fn tick(&mut self) {
+    //     println!("tick. location: {:?}", self.vehicle.location_global);
+    // }
+
+    fn send(&mut self, data: DkMessage) {
+        let mut pkt = MavPacket {
+            seq: self.msg_id,
+            system_id: 255,
+            component_id: 0,
+            message_id: data.message_id(),
+            data: data.serialize(),
+            checksum: 0,
+        };
+        pkt.update_crc();
+        let out = pkt.encode();
+        // let outlen = out.len();
+
+        self.msg_id = self.msg_id.wrapping_add(1);
+
+        // println!(">>> {:?}", out);
+        // let mut cur = Cursor::new(out);
+        self.tx.send(DkHandlerMessage::TxMessage(out));
+        // (outlen, self.socket.try_write_buf(&mut cur))
     }
 }
 
@@ -469,6 +476,7 @@ pub fn connect(address: SocketAddr) -> VehicleConnection {
             socket: socket,
             buf: vec![],
             vehicle_tx: tx,
+            watchers: vec![],
         });
     });
 

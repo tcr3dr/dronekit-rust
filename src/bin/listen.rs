@@ -23,13 +23,15 @@ fn vehicle_loop<F>(mut vehicle: Vehicle, fps: i32, func: F)
 
     println!("params {:?}", vehicle.parameters.get("FS_EKF_THRESH"));
     
-    let s = vehicle.parameters.set("FS_EKF_THRESH", 30.0);
-    vehicle.await(s);
-    println!("params {:?}", vehicle.parameters.get("FS_EKF_THRESH"));
+    vehicle.parameters.set("FS_EKF_THRESH", 30.0).await();
+    println!("old params {:?}", vehicle.parameters.get("FS_EKF_THRESH"));
+    vehicle.update(true);
+    println!("new params {:?}", vehicle.parameters.get("FS_EKF_THRESH"));
 
-    let s = vehicle.parameters.set("FS_EKF_THRESH", 20.0);
-    vehicle.await(s);
-    println!("params {:?}", vehicle.parameters.get("FS_EKF_THRESH"));
+    vehicle.parameters.set("FS_EKF_THRESH", 20.0).await();
+    println!("old params {:?}", vehicle.parameters.get("FS_EKF_THRESH"));
+    vehicle.update(true);
+    println!("new params {:?}", vehicle.parameters.get("FS_EKF_THRESH"));
 }
 
 fn main() {

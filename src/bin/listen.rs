@@ -33,6 +33,8 @@ fn vehicle_loop<F>(mut vehicle: Vehicle, fps: i32, func: F)
     println!("old params {:?}", vehicle.parameters.get("FS_EKF_THRESH"));
     vehicle.update(true);
     println!("new params {:?}", vehicle.parameters.get("FS_EKF_THRESH"));
+
+    vehicle.spin();
 }
 
 fn main() {

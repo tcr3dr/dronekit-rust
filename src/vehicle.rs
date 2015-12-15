@@ -228,6 +228,12 @@ impl Vehicle {
             },
         }
     }
+
+    pub fn spin(&mut self) {
+        loop {
+            self.update(true)
+        }
+    }
 }
 
 #[derive(Clone)]

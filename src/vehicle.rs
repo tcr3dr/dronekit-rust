@@ -350,8 +350,6 @@ struct DkHandler {
     buf: Vec<u8>,
     vehicle_tx: Sender<DkHandlerRx>,
     watchers: UpdaterList,
-    corked: bool,
-    corkqueue: Vec<DkMessage>,
 }
 
 enum DkHandlerRx {
@@ -377,6 +375,16 @@ impl DkHandler {
                 self.watchers.push(x);
             }
         }
+    }
+
+    fn register(&mut self, event_loop: &mut mio::EventLoop<DkHandler>) {
+        event_loop.register_opt(&self.socket, CLIENT,
+            mio::EventSet::readable(),
+            mio::PollOpt::edge()).unwrap();
+    }
+
+    fn deregister(&mut self, event_loop: &mut mio::EventLoop<DkHandler>) {
+        event_loop.deregister(&self.socket);
     }
 }
 
@@ -442,11 +450,7 @@ impl mio::Handler for DkHandler {
 
                                     // handle packet
                                     if let Some(pkt) = packet.parse() {
-                                        if self.corked {
-                                            self.corkqueue.push(pkt);
-                                        } else {
-                                            self.dispatch(pkt);
-                                        }
+                                        self.dispatch(pkt);
                                     }
                                     
                                     // change this
@@ -485,15 +489,11 @@ impl mio::Handler for DkHandler {
                 self.watchers.push(func);
             }
             DkHandlerMessage::TxCork => {
-                self.corked = true;
+                self.deregister(event_loop);
                 self.vehicle_tx.send(DkHandlerRx::RxCork);
             }
             DkHandlerMessage::TxUncork => {
-                let mut msgs = self.corkqueue.split_off(0);
-                for m in msgs.into_iter() {
-                    self.dispatch(m);
-                }
-                self.corked = false;
+                self.register(event_loop);
             }
         }
     }
@@ -585,9 +585,6 @@ pub fn connect(address: SocketAddr) -> VehicleConnection {
     };
 
     let mut event_loop = mio::EventLoop::new().unwrap();
-    event_loop.register_opt(&socket, CLIENT,
-        mio::EventSet::readable(),
-        mio::PollOpt::edge()).unwrap();
 
     // let sender = event_loop.channel();
     // // Send the notification from another thread
@@ -597,14 +594,14 @@ pub fn connect(address: SocketAddr) -> VehicleConnection {
 
     thread::spawn(move || {
         println!("running pingpong socket");
-        event_loop.run(&mut DkHandler {
+        let mut handler = DkHandler {
             socket: socket,
             buf: vec![],
             vehicle_tx: tx,
             watchers: vec![],
-            corked: false,
-            corkqueue: vec![],
-        });
+        };
+        handler.register(&mut event_loop);
+        event_loop.run(&mut handler);
     });
 
     return VehicleConnection {

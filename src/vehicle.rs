@@ -12,6 +12,11 @@ use bit_vec::BitVec;
 
 use connection::{VehicleConnection, parse_mavlink_string};
 
+pub enum VehicleMode {
+    LOITER,
+    GUIDED,
+}
+
 #[derive(Clone)]
 pub struct Parameters {
     values: HashMap<String, f32>,
@@ -230,6 +235,58 @@ impl Vehicle {
                 // println!("dunno: {:?}", pkt);
             },
         }
+    }
+
+    pub fn set_mode(&mut self, mode: VehicleMode) -> Future<(), ()> {
+        let (tx, future) = Future::<(), ()>::pair();
+
+        let mut conn = self.connection.borrow_mut();
+        
+        conn.complete(tx, Box::new(move |msg| {
+            if let DkMessage::HEARTBEAT(data) = msg {
+                (data.base_mode & 1 != 0) && (data.custom_mode == 4)
+            } else {
+                false
+            }
+        }));
+
+        conn.send(DkMessage::SET_MODE(SET_MODE_DATA {
+            target_system: 0,
+            base_mode: 1,
+            custom_mode: 4,
+        }));
+
+        future
+    }
+
+    pub fn arm(&mut self) -> Future<(), ()> {
+        let (tx, future) = Future::<(), ()>::pair();
+
+        let mut conn = self.connection.borrow_mut();
+        
+        conn.complete(tx, Box::new(move |msg| {
+            if let DkMessage::HEARTBEAT(data) = msg {
+                (data.base_mode & 128) != 0
+            } else {
+                false
+            }
+        }));
+
+        conn.send(DkMessage::COMMAND_LONG(COMMAND_LONG_DATA {
+            target_system: 0,
+            target_component: 0,
+            command: 400,
+            confirmation: 0,
+            param1: 1.0,
+            param2: 0.0,
+            param3: 0.0,
+            param4: 0.0,
+            param5: 0.0,
+            param6: 0.0,
+            param7: 0.0,
+        }));
+
+        future
     }
 
     pub fn spin(&mut self) {

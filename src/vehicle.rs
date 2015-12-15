@@ -2,7 +2,6 @@ extern crate mio;
 extern crate bit_vec;
 
 use mavlink::*;
-use std::iter::FromIterator;
 
 use std::collections::{HashMap};
 use std::iter::repeat;
@@ -11,12 +10,13 @@ use std::rc::Rc;
 use eventual::{Future};
 use bit_vec::BitVec;
 
-use connection::{VehicleConnection, parse_mavlink_string, DkHandlerMessage, DkHandlerRx};
+use connection::{VehicleConnection, parse_mavlink_string};
 
 #[derive(Clone)]
 pub struct Parameters {
     values: HashMap<String, f32>,
     indexes: Vec<Option<String>>,
+    missing: BitVec,
     connection: Rc<RefCell<VehicleConnection>>,
 }
 
@@ -25,6 +25,7 @@ impl Parameters {
         Parameters {
             values: HashMap::new(),
             indexes: vec![],
+            missing: BitVec::new(),
             connection: connection,
         }
     }
@@ -33,6 +34,7 @@ impl Parameters {
         if self.indexes.len() != len as usize {
             self.values = HashMap::new();
             self.indexes = repeat(None).take(len as usize).collect();
+            self.missing = BitVec::from_elem(len as usize, false);
         }
     }
 
@@ -40,6 +42,7 @@ impl Parameters {
         self.values.insert(name.into(), value);
         if index != 65535 {
             self.indexes[index as usize] = Some(name.into());
+            self.missing.set(index as usize, true);
         }
     }
 
@@ -49,24 +52,19 @@ impl Parameters {
 
     pub fn set(&mut self, name: &str, value: f32) -> Future<(), ()> {
         let (tx, future) = Future::<(), ()>::pair();
-        
-        let mut txlock = Some(tx);
-        let name_closure: String = name.clone().into();
-        self.connection.borrow_mut().tx.send(DkHandlerMessage::TxWatcher(Box::new(move |msg| {
-            if let DkMessage::PARAM_VALUE(data) = msg {
-                if parse_mavlink_string(&data.param_id) == name_closure {
-                    if data.param_value == value {
-                        if let Some(tx) = txlock.take() {
-                            tx.complete(());
-                        }
-                        return false;
-                    }
-                }
-            }
-            true
-        }))).unwrap();
 
-        self.connection.borrow_mut().send(DkMessage::PARAM_SET(PARAM_SET_DATA {
+        let mut conn = self.connection.borrow_mut();
+        
+        let name_closure: String = name.into();
+        conn.complete(tx, Box::new(move |msg| {
+            if let DkMessage::PARAM_VALUE(data) = msg {
+                parse_mavlink_string(&data.param_id) == name_closure && data.param_value == value
+            } else {
+                false
+            }
+        }));
+
+        conn.send(DkMessage::PARAM_SET(PARAM_SET_DATA {
             param_value: value,
             target_system: 0,
             target_component: 0,
@@ -81,36 +79,25 @@ impl Parameters {
         let (tx, future) = Future::<(), ()>::pair();
 
         // Create the bit vector
-        let mut filledlist: BitVec = BitVec::from_iter(self.indexes.iter().map(|x| x.is_some()));
-        if self.indexes.len() > 0 && filledlist.all() {
+        if self.missing.len() > 0 && self.missing.all() {
             tx.complete(());
         } else {
             let mut conn = self.connection.borrow_mut();
-            let buffer = conn.cork();
-
-            let mut txlock = Some(tx);
-            let mut watch = move |msg| {
-                // println!("watchers! {:?}", msg);
+            let mut missing = self.missing.clone();
+            conn.complete(tx, Box::new(move |msg| {
                 if let DkMessage::PARAM_VALUE(data) = msg {
-                    if data.param_count as usize != filledlist.len() {
-                        filledlist = BitVec::from_elem(data.param_count as usize, false);
+                    // Resize the array if a new parameter is sent.
+                    if data.param_count as usize != missing.len() {
+                        missing = BitVec::from_elem(data.param_count as usize, false);
                     }
-                    filledlist.set(data.param_index as usize, true);
-                    if filledlist.all() {
-                        if let Some(tx) = txlock.take() {
-                            tx.complete(());
-                        }
-                        return false;
-                    }
-                }
-                true
-            };
 
-            if !buffer.into_iter().any(|x| !watch(x)) {
-                conn.tx.send(DkHandlerMessage::TxWatcher(Box::new(watch))).unwrap();
-            }
-            
-            conn.uncork();
+                    // If we have a complete set, indicate as such.
+                    missing.set(data.param_index as usize, true);
+                    missing.all()
+                } else {
+                    false
+                }
+            }));
         }
 
         future
@@ -126,7 +113,6 @@ impl Parameters {
 }
 
 
-
 #[derive(Clone, Debug)]
 pub struct LocationGlobal {
     pub alt: i32,
@@ -139,6 +125,7 @@ pub struct Vehicle {
     pub parameters: Parameters,
     pub location_global: Option<LocationGlobal>,
     connection: Rc<RefCell<VehicleConnection>>,
+    master_heartbeat: bool,
 }
 
 impl Vehicle {
@@ -148,6 +135,7 @@ impl Vehicle {
             parameters: Parameters::new(connection.clone()),
             location_global: None,
             connection: connection,
+            master_heartbeat: false,
         }
     }
 
@@ -156,10 +144,8 @@ impl Vehicle {
             let val = {
                 self.connection.borrow_mut().recv()
             };
-            if let Ok(pkt) = val {
-                if let DkHandlerRx::RxMessage(msg) = pkt {
-                    self.on_message(msg);
-                }
+            if let Ok(msg) = val {
+                self.on_message(msg);
             } else {
                 return;
             }
@@ -170,10 +156,8 @@ impl Vehicle {
             let val = {
                 self.connection.borrow_mut().try_recv()
             };
-            if let Ok(pkt) = val {
-                if let DkHandlerRx::RxMessage(msg) = pkt {
-                    self.on_message(msg);
-                }
+            if let Ok(msg) = val {
+                self.on_message(msg);
             } else {
                 break;
             }
@@ -182,9 +166,12 @@ impl Vehicle {
 
     pub fn init (&mut self) {
         self.send_heartbeat();
-        while !self.connection.borrow().started {
+        while !self.master_heartbeat {
             self.update(true);
         }
+
+        self.request_parameters();
+        self.request_stream();
     }
 
     fn send_heartbeat(&mut self) {
@@ -198,28 +185,28 @@ impl Vehicle {
         }));
     }
 
+    fn request_parameters(&mut self) {
+        self.connection.borrow_mut().send(DkMessage::PARAM_REQUEST_LIST(PARAM_REQUEST_LIST_DATA {
+            target_system: 0,
+            target_component: 0,
+        }));
+    }
+
+    fn request_stream(&mut self) {
+        self.connection.borrow_mut().send(DkMessage::REQUEST_DATA_STREAM(REQUEST_DATA_STREAM_DATA {
+            target_system: 0,
+            target_component: 0,
+            req_stream_id: 0,
+            req_message_rate: 100,
+            start_stop: 1,
+        }));
+    }
+
     fn on_message(&mut self, pkt: DkMessage) {
         match pkt {
             DkMessage::HEARTBEAT(..) => {
                 self.send_heartbeat();
-
-                if !self.connection.borrow().started {
-                    self.connection.borrow_mut().started = true;
-
-                    self.connection.borrow_mut().send(DkMessage::PARAM_REQUEST_LIST(PARAM_REQUEST_LIST_DATA {
-                        target_system: 0,
-                        target_component: 0,
-                    }));
-
-                    self.connection.borrow_mut().send(DkMessage::REQUEST_DATA_STREAM(REQUEST_DATA_STREAM_DATA {
-                        target_system: 0,
-                        target_component: 0,
-                        req_stream_id: 0,
-                        req_message_rate: 100,
-                        start_stop: 1,
-                    }));
-                    // println!("start params {:?}", res);
-                }
+                self.master_heartbeat = true;
             },
             DkMessage::STATUSTEXT(data) => {
                 let text = parse_mavlink_string(&data.text);

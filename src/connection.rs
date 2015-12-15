@@ -11,6 +11,7 @@ use mio::tcp::TcpStream;
 use std::io::Cursor;
 use std::collections::{VecDeque};
 use std::sync::mpsc::{Sender, Receiver, RecvError, TryRecvError};
+use eventual::{Complete};
 
 pub const CLIENT: mio::Token = mio::Token(0);
 
@@ -112,7 +113,7 @@ impl DkHandler {
 
         let ups = self.watchers.split_off(0);
         for mut x in ups.into_iter() {
-            if x(pkt2.clone()) {
+            if !x(pkt2.clone()) {
                 self.watchers.push(x);
             }
         }
@@ -258,19 +259,43 @@ impl VehicleConnection {
         self.tx.send(DkHandlerMessage::TxUncork).unwrap();
     }
 
-    pub fn recv(&mut self) -> Result<DkHandlerRx, RecvError> {
-        if let Some(msg) = self.buffer.pop_front() {
-            Ok(DkHandlerRx::RxMessage(msg))
-        } else {
-            self.rx.recv()
+    pub fn recv(&mut self) -> Result<DkMessage, RecvError> {
+        loop {
+            if let Some(msg) = self.buffer.pop_front() {
+                return Ok(msg);
+            } else {
+                match self.rx.recv() {
+                    Ok(DkHandlerRx::RxMessage(msg)) => {
+                        return Ok(msg);
+                    }
+                    Ok(..) => {
+                        continue
+                    }
+                    Err(err) => {
+                        return Err(err);
+                    }
+                }
+            }
         }
     }
 
-    pub fn try_recv(&mut self) -> Result<DkHandlerRx, TryRecvError> {
-        if let Some(msg) = self.buffer.pop_front() {
-            Ok(DkHandlerRx::RxMessage(msg))
-        } else {
-            self.rx.try_recv()
+    pub fn try_recv(&mut self) -> Result<DkMessage, TryRecvError> {
+        loop {
+            if let Some(msg) = self.buffer.pop_front() {
+                return Ok(msg);
+            } else {
+                match self.rx.try_recv() {
+                    Ok(DkHandlerRx::RxMessage(msg)) => {
+                        return Ok(msg);
+                    }
+                    Ok(..) => {
+                        continue
+                    }
+                    Err(err) => {
+                        return Err(err);
+                    }
+                }
+            }
         }
     }
 
@@ -293,5 +318,27 @@ impl VehicleConnection {
         // let mut cur = Cursor::new(out);
         self.tx.send(DkHandlerMessage::TxMessage(out)).unwrap();
         // (outlen, self.socket.try_write_buf(&mut cur))
+    }
+
+    pub fn complete(&mut self, tx: Complete<(), ()>, mut watch: Box<FnMut(DkMessage) -> bool + Send>) {
+        let buffer = self.cork();
+
+        if !buffer.into_iter().any(|x| watch(x)) {
+            let mut txlock = Some(tx);
+            self.tx.send(DkHandlerMessage::TxWatcher(Box::new(move |msg| {
+                if watch(msg) {
+                    if let Some(tx) = txlock.take() {
+                        tx.complete(());
+                    }
+                    true
+                } else {
+                    false
+                }
+            }))).unwrap();
+        } else {
+            tx.complete(());
+        }
+            
+        self.uncork();
     }
 }

@@ -2,29 +2,13 @@ extern crate mio;
 extern crate bit_vec;
 
 use mavlink::*;
-use crc16;
 use std::iter::FromIterator;
 
-use std::num::Wrapping;
-use byteorder::{BigEndian, LittleEndian, ReadBytesExt};
-
-use std::fs::File;
-use std::io::BufReader;
-use mio::{TryRead, TryWrite};
-use mio::tcp::TcpStream;
-use mio::util::Slab;
-use bytes::Buf;
-use std::{mem, str};
-use std::io::Cursor;
-use std::net::SocketAddr;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap};
 use std::iter::repeat;
-use std::cmp::max;
-use std::thread;
-use std::sync::mpsc::{channel, Sender, Receiver, RecvError, TryRecvError};
 use std::cell::RefCell;
 use std::rc::Rc;
-use eventual::{Future, Async};
+use eventual::{Future};
 use bit_vec::BitVec;
 
 use connection::{VehicleConnection, parse_mavlink_string, DkHandlerMessage, DkHandlerRx};
@@ -80,7 +64,7 @@ impl Parameters {
                 }
             }
             true
-        })));
+        }))).unwrap();
 
         self.connection.borrow_mut().send(DkMessage::PARAM_SET(PARAM_SET_DATA {
             param_value: value,
@@ -89,12 +73,9 @@ impl Parameters {
             param_id: name.chars().chain(repeat(0 as char)).take(16).map(|x| x as u8).collect(),
             param_type: 0,
         }));
+
         future
     }
-
-    // pub fn sync() {
-    //     self.vehicle_tx.send(DkHandlerMessage::TxSync);
-    // }
 
     pub fn complete(&self) -> Future<(), ()> {
         let (tx, future) = Future::<(), ()>::pair();
@@ -126,7 +107,7 @@ impl Parameters {
             };
 
             if !buffer.into_iter().any(|x| !watch(x)) {
-                conn.tx.send(DkHandlerMessage::TxWatcher(Box::new(watch)));
+                conn.tx.send(DkHandlerMessage::TxWatcher(Box::new(watch))).unwrap();
             }
             
             conn.uncork();
@@ -218,18 +199,9 @@ impl Vehicle {
     }
 
     fn on_message(&mut self, pkt: DkMessage) {
-        let pkt2 = pkt.clone();
         match pkt {
             DkMessage::HEARTBEAT(..) => {
                 self.send_heartbeat();
-
-                // if let Ok(Some(n)) = res {
-                //     if n != outlen {
-                //         println!("ERROR: only wrote {:?}", n);
-                //     }
-                // } else {
-                //     println!("ERROR: didnt write anything");
-                // }
 
                 if !self.connection.borrow().started {
                     self.connection.borrow_mut().started = true;
@@ -257,7 +229,7 @@ impl Vehicle {
                 self.parameters.resize(data.param_count);
                 self.parameters.assign(data.param_index, &parse_mavlink_string(&data.param_id), data.param_value);
             },
-            DkMessage::ATTITUDE(data) => {
+            DkMessage::ATTITUDE(..) => {
                 // println!("roll: {:?}\tpitch: {:?}\tyaw: {:?}", data.roll, data.pitch, data.yaw);
             },
             DkMessage::GLOBAL_POSITION_INT(data) => {

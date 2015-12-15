@@ -14,9 +14,9 @@ pub mod connection;
 
 use connection::{VehicleConnection, DkHandler};
 use std::net::SocketAddr;
-use std::sync::mpsc::{channel, Sender, Receiver, RecvError, TryRecvError};
+use std::sync::mpsc::{channel};
 use mio::tcp::TcpStream;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{VecDeque};
 use std::thread;
 
 pub fn connect(address: SocketAddr) -> VehicleConnection {
@@ -33,9 +33,6 @@ pub fn connect(address: SocketAddr) -> VehicleConnection {
 
     let mut event_loop = mio::EventLoop::new().unwrap();
 
-    // let sender = event_loop.channel();
-    // // Send the notification from another thread
-
     let (tx, rx) = channel();
     let vehicle_tx = event_loop.channel();
 
@@ -48,7 +45,7 @@ pub fn connect(address: SocketAddr) -> VehicleConnection {
             watchers: vec![],
         };
         handler.register(&mut event_loop);
-        event_loop.run(&mut handler);
+        event_loop.run(&mut handler).unwrap();
     });
 
     return VehicleConnection {

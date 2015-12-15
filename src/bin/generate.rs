@@ -47,8 +47,12 @@ pub fn main() {
     let file = BufReader::new(file);
     let profile = parse_profile(Box::new(file));
 
+    println!("#![allow(non_camel_case_types)]");
+    println!("#![allow(non_snake_case)]");
+    println!("");
+
     println!("use std::io::Cursor;");
-    println!("use byteorder::{{BigEndian, LittleEndian, ReadBytesExt, WriteBytesExt}};");
+    println!("use byteorder::{{LittleEndian, ReadBytesExt, WriteBytesExt}};");
     println!("");
 
     println!("pub trait Parsable {{");

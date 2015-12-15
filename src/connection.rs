@@ -3,29 +3,14 @@ extern crate bit_vec;
 
 use mavlink::*;
 use crc16;
-use std::iter::FromIterator;
 
-use std::num::Wrapping;
-use byteorder::{BigEndian, LittleEndian, ReadBytesExt};
+use byteorder::{LittleEndian, ReadBytesExt};
 
-use std::fs::File;
-use std::io::BufReader;
 use mio::{TryRead, TryWrite};
 use mio::tcp::TcpStream;
-use mio::util::Slab;
-use bytes::Buf;
-use std::{mem, str};
 use std::io::Cursor;
-use std::net::SocketAddr;
-use std::collections::{HashMap, VecDeque};
-use std::iter::repeat;
-use std::cmp::max;
-use std::thread;
-use std::sync::mpsc::{channel, Sender, Receiver, RecvError, TryRecvError};
-use std::cell::RefCell;
-use std::rc::Rc;
-use eventual::{Future, Async};
-use bit_vec::BitVec;
+use std::collections::{VecDeque};
+use std::sync::mpsc::{Sender, Receiver, RecvError, TryRecvError};
 
 pub const CLIENT: mio::Token = mio::Token(0);
 
@@ -123,9 +108,9 @@ pub enum DkHandlerMessage {
 impl DkHandler {
     fn dispatch(&mut self, pkt: DkMessage) {
         let pkt2 = pkt.clone();
-        self.vehicle_tx.send(DkHandlerRx::RxMessage(pkt));
+        self.vehicle_tx.send(DkHandlerRx::RxMessage(pkt)).unwrap();
 
-        let mut ups = self.watchers.split_off(0);
+        let ups = self.watchers.split_off(0);
         for mut x in ups.into_iter() {
             if x(pkt2.clone()) {
                 self.watchers.push(x);
@@ -140,7 +125,7 @@ impl DkHandler {
     }
 
     pub fn deregister(&mut self, event_loop: &mut mio::EventLoop<DkHandler>) {
-        event_loop.deregister(&self.socket);
+        event_loop.deregister(&self.socket).unwrap();
     }
 }
 
@@ -148,38 +133,21 @@ impl mio::Handler for DkHandler {
     type Timeout = ();
     type Message = DkHandlerMessage;
 
-    fn ready(&mut self, event_loop: &mut mio::EventLoop<DkHandler>, token: mio::Token, events: mio::EventSet) {
+    fn ready(&mut self, _: &mut mio::EventLoop<DkHandler>, token: mio::Token, events: mio::EventSet) {
         match token {
             CLIENT => {
                 // Only receive readable events
                 assert!(events.is_readable());
 
-                // println!("the socket socket is ready to accept a connection");
-                // match self.socket.accept() {
-                //     Ok(Some(socket)) => {
-                //         println!("accepted a socket, exiting program");
-                //         event_loop.shutdown();
-                //     }
-                //     Ok(None) => {
-                //         println!("the socket socket wasn't actually ready");
-                //     }
-                //     Err(e) => {
-                //         println!("listener.accept() errored: {}", e);
-                //         event_loop.shutdown();
-                //     }
-                // }
-
                 match self.socket.try_read_buf(&mut self.buf) {
                     Ok(Some(0)) => {
                         unimplemented!();
                     }
-                    Ok(Some(n)) => {
-                        // crc16::State::<crc16::MCRF4XX>::calculate()
+                    Ok(Some(..)) => {
                         let mut start: usize = 0;
                         loop {
                             match self.buf[start..].iter().position(|&x| x == 0xfe) {
                                 Some(i) => {
-                                    // println!("from: {:?} {:?}", start + i, self.buf);
                                     if start + i + 8 > self.buf.len() {
                                         break;
                                     }
@@ -239,14 +207,14 @@ impl mio::Handler for DkHandler {
     fn notify(&mut self, event_loop: &mut mio::EventLoop<DkHandler>, message: DkHandlerMessage) {
         match message {
             DkHandlerMessage::TxMessage(msg) => {
-                self.socket.try_write_buf(&mut Cursor::new(msg));
+                self.socket.try_write_buf(&mut Cursor::new(msg)).unwrap();
             }
             DkHandlerMessage::TxWatcher(func) => {
                 self.watchers.push(func);
             }
             DkHandlerMessage::TxCork => {
                 self.deregister(event_loop);
-                self.vehicle_tx.send(DkHandlerRx::RxCork);
+                self.vehicle_tx.send(DkHandlerRx::RxCork).unwrap();
             }
             DkHandlerMessage::TxUncork => {
                 self.register(event_loop);
@@ -269,7 +237,7 @@ impl VehicleConnection {
     // }
 
     pub fn cork(&mut self) -> Vec<DkMessage> {
-        self.tx.send(DkHandlerMessage::TxCork);
+        self.tx.send(DkHandlerMessage::TxCork).unwrap();
 
         loop {
             match self.rx.recv() {
@@ -287,7 +255,7 @@ impl VehicleConnection {
     }
 
     pub fn uncork(&mut self) {
-        self.tx.send(DkHandlerMessage::TxUncork);
+        self.tx.send(DkHandlerMessage::TxUncork).unwrap();
     }
 
     pub fn recv(&mut self) -> Result<DkHandlerRx, RecvError> {
@@ -323,7 +291,7 @@ impl VehicleConnection {
 
         // println!(">>> {:?}", out);
         // let mut cur = Cursor::new(out);
-        self.tx.send(DkHandlerMessage::TxMessage(out));
+        self.tx.send(DkHandlerMessage::TxMessage(out)).unwrap();
         // (outlen, self.socket.try_write_buf(&mut cur))
     }
 }

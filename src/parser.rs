@@ -1,7 +1,4 @@
-use std::fs::File;
-use std::io::BufReader;
 use std::default::Default;
-use std::collections::HashMap;
 use std::cmp::Ordering;
 
 use xml::reader::{EventReader, XmlEvent};
@@ -125,7 +122,7 @@ impl MavType {
             UInt16 | Int16 => 2,
             UInt32 | Int32 | Float => 4,
             UInt64 | Int64 | Double => 8,
-            Array(t, size) => t.len(),
+            Array(t, _) => t.len(),
         }
     }
 
@@ -144,7 +141,7 @@ impl MavType {
             UInt64 => "uint64_t".into(),
             Int64 => "int64_t".into(),
             Double => "double".into(),
-            Array(t, size) => t.primitive_type(),
+            Array(t, _) => t.primitive_type(),
         }
     }
 
@@ -395,7 +392,7 @@ pub fn parse_profile<'r>(file: Box<::std::io::Read>) -> MavProfile {
                     },
                 }
             }
-            Ok(XmlEvent::EndElement { name }) => {
+            Ok(XmlEvent::EndElement { .. }) => {
                 match stack.last() {
                     Some(&MavXmlElement::Field) => {
                         message.fields.push(field.clone())

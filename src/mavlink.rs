@@ -1,5 +1,8 @@
+#![allow(non_camel_case_types)]
+#![allow(non_snake_case)]
+
 use std::io::Cursor;
-use byteorder::{BigEndian, LittleEndian, ReadBytesExt, WriteBytesExt};
+use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 
 pub trait Parsable {
     fn parse(payload: &[u8]) -> Self;

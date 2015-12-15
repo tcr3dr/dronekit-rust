@@ -15,11 +15,11 @@ use bytes::Buf;
 use std::{mem, str};
 use std::io::Cursor;
 use std::net::SocketAddr;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::iter::repeat;
 use std::cmp::max;
 use std::thread;
-use std::sync::mpsc::{channel, Sender, Receiver};
+use std::sync::mpsc::{channel, Sender, Receiver, RecvError, TryRecvError};
 use std::cell::RefCell;
 use std::rc::Rc;
 use eventual::{Future, Async};
@@ -127,10 +127,12 @@ impl Vehicle {
     pub fn update(&mut self, wait: bool) {
         if wait {
             let val = {
-                self.connection.borrow().rx.recv()
+                self.connection.borrow_mut().recv()
             };
             if let Ok(pkt) = val {
-                self.on_message(pkt);
+                if let DkHandlerRx::RxMessage(msg) = pkt {
+                    self.on_message(msg);
+                }
             } else {
                 return;
             }
@@ -139,10 +141,12 @@ impl Vehicle {
         // Get remaining queued packets
         loop {
             let val = {
-                self.connection.borrow().rx.try_recv()
+                self.connection.borrow_mut().try_recv()
             };
             if let Ok(pkt) = val {
-                self.on_message(pkt);
+                if let DkHandlerRx::RxMessage(msg) = pkt {
+                    self.on_message(msg);
+                }
             } else {
                 break;
             }
@@ -249,21 +253,14 @@ impl Parameters {
 
     pub fn set(&mut self, name: &str, value: f32) -> Future<(), ()> {
         let (tx, future) = Future::<(), ()>::pair();
-        let name2: String = name.clone().into();
-        let mut tx2 = Some(tx);
-        let outpkt = DkMessage::PARAM_SET(PARAM_SET_DATA {
-            param_value: value,
-            target_system: 0,
-            target_component: 0,
-            param_id: name.chars().chain(repeat(0 as char)).take(16).map(|x| x as u8).collect(),
-            param_type: 0,
-        });
-        self.connection.borrow_mut().send(outpkt);
+        
+        let mut txlock = Some(tx);
+        let name_closure: String = name.clone().into();
         self.connection.borrow_mut().tx.send(DkHandlerMessage::TxWatcher(Box::new(move |msg| {
             if let DkMessage::PARAM_VALUE(data) = msg {
-                if parse_mavlink_string(&data.param_id) == name2 {
+                if parse_mavlink_string(&data.param_id) == name_closure {
                     if data.param_value == value {
-                        if let Some(tx) = tx2.take() {
+                        if let Some(tx) = txlock.take() {
                             tx.complete(());
                         }
                         return false;
@@ -272,11 +269,51 @@ impl Parameters {
             }
             true
         })));
+
+        self.connection.borrow_mut().send(DkMessage::PARAM_SET(PARAM_SET_DATA {
+            param_value: value,
+            target_system: 0,
+            target_component: 0,
+            param_id: name.chars().chain(repeat(0 as char)).take(16).map(|x| x as u8).collect(),
+            param_type: 0,
+        }));
         future
     }
 
-    pub fn complete(&self) -> bool {
-        self.indexes.len() != 0 && self.indexes.iter().position(|x| x.is_none()).is_none()
+    // pub fn sync() {
+    //     self.vehicle_tx.send(DkHandlerMessage::TxSync);
+    // }
+
+    pub fn complete(&self) -> Future<(), ()> {
+        let (tx, future) = Future::<(), ()>::pair();
+
+        let mut conn = self.connection.borrow_mut();
+
+        let buffer = conn.cork();
+        
+        let mut txlock = Some(tx);
+        let watch = move |msg| {
+            // if let DkMessage::PARAM_VALUE(data) = msg {
+            //     if parse_mavlink_string(&data.param_id) == name {
+            //         if data.param_value == value {
+            //             if let Some(tx) = txlock.take() {
+            //                 tx.complete(());
+            //             }
+            //             return false;
+            //         }
+            //     }
+            // }
+            // true
+            false
+        };
+
+        if !buffer.into_iter().any(|x| !watch(x)) {
+            conn.tx.send(DkHandlerMessage::TxWatcher(Box::new(watch)));
+        }
+
+        conn.uncork();
+
+        future
     }
 
     pub fn remaining(&self) -> usize {
@@ -291,13 +328,36 @@ impl Parameters {
 struct DkHandler {
     socket: TcpStream,
     buf: Vec<u8>,
-    vehicle_tx: Sender<DkMessage>,
+    vehicle_tx: Sender<DkHandlerRx>,
     watchers: UpdaterList,
+    corked: bool,
+    corkqueue: Vec<DkMessage>,
+}
+
+enum DkHandlerRx {
+    RxCork,
+    RxMessage(DkMessage),
 }
 
 enum DkHandlerMessage {
     TxMessage(Vec<u8>),
-    TxWatcher(Box<FnMut(DkMessage) -> bool + Send>)
+    TxWatcher(Box<FnMut(DkMessage) -> bool + Send>),
+    TxCork,
+    TxUncork,
+}
+
+impl DkHandler {
+    fn dispatch(&mut self, pkt: DkMessage) {
+        let pkt2 = pkt.clone();
+        self.vehicle_tx.send(DkHandlerRx::RxMessage(pkt));
+
+        let mut ups = self.watchers.split_off(0);
+        for mut x in ups.into_iter() {
+            if x(pkt2.clone()) {
+                self.watchers.push(x);
+            }
+        }
+    }
 }
 
 impl mio::Handler for DkHandler {
@@ -362,16 +422,11 @@ impl mio::Handler for DkHandler {
 
                                     // handle packet
                                     if let Some(pkt) = packet.parse() {
-                                        let pkt2 = pkt.clone();
-                                        self.vehicle_tx.send(pkt);
-
-                                        let mut ups = self.watchers.split_off(0);
-                                        for mut x in ups.into_iter() {
-                                            if x(pkt2.clone()) {
-                                                self.watchers.push(x);
-                                            }
-                                        } //;.filter(|func| func(self)).collect();
-                                        // self.watchers.borrow_mut().extend(ups2);
+                                        if self.corked {
+                                            self.corkqueue.push(pkt);
+                                        } else {
+                                            self.dispatch(pkt);
+                                        }
                                     }
                                     
                                     // change this
@@ -409,21 +464,71 @@ impl mio::Handler for DkHandler {
             DkHandlerMessage::TxWatcher(func) => {
                 self.watchers.push(func);
             }
+            DkHandlerMessage::TxCork => {
+                self.corked = true;
+                self.vehicle_tx.send(DkHandlerRx::RxCork);
+            }
+            DkHandlerMessage::TxUncork => {
+                let mut msgs = self.corkqueue.split_off(0);
+                for m in msgs.into_iter() {
+                    self.dispatch(m);
+                }
+                self.corked = false;
+            }
         }
     }
 }
 
 pub struct VehicleConnection {
     tx: mio::Sender<DkHandlerMessage>,
-    rx: Receiver<DkMessage>,
+    rx: Receiver<DkHandlerRx>,
     msg_id: u8,
     started: bool,
+    buffer: VecDeque<DkMessage>,
 }
 
 impl VehicleConnection {
     // fn tick(&mut self) {
     //     println!("tick. location: {:?}", self.vehicle.location_global);
     // }
+
+    fn cork(&mut self) -> Vec<DkMessage> {
+        self.tx.send(DkHandlerMessage::TxCork);
+
+        loop {
+            match self.rx.recv() {
+                Ok(DkHandlerRx::RxCork) => {
+                    break;
+                }
+                Ok(DkHandlerRx::RxMessage(msg)) => {
+                    self.buffer.push_back(msg);
+                }
+                _ => {},
+            }
+        }
+
+        self.buffer.clone().into_iter().collect()
+    }
+
+    fn uncork(&mut self) {
+        self.tx.send(DkHandlerMessage::TxUncork);
+    }
+
+    fn recv(&mut self) -> Result<DkHandlerRx, RecvError> {
+        if let Some(msg) = self.buffer.pop_front() {
+            Ok(DkHandlerRx::RxMessage(msg))
+        } else {
+            self.rx.recv()
+        }
+    }
+
+    fn try_recv(&mut self) -> Result<DkHandlerRx, TryRecvError> {
+        if let Some(msg) = self.buffer.pop_front() {
+            Ok(DkHandlerRx::RxMessage(msg))
+        } else {
+            self.rx.try_recv()
+        }
+    }
 
     fn send(&mut self, data: DkMessage) {
         let mut pkt = MavPacket {
@@ -477,6 +582,8 @@ pub fn connect(address: SocketAddr) -> VehicleConnection {
             buf: vec![],
             vehicle_tx: tx,
             watchers: vec![],
+            corked: false,
+            corkqueue: vec![],
         });
     });
 
@@ -485,5 +592,6 @@ pub fn connect(address: SocketAddr) -> VehicleConnection {
         rx: rx,
         msg_id: 0,
         started: false,
+        buffer: VecDeque::new(),
     };
 }

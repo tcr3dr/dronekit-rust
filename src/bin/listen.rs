@@ -17,9 +17,8 @@ fn vehicle_loop<F>(mut vehicle: Vehicle, fps: i32, func: F)
     //     func(&mut vehicle);
     // }
 
-    while !vehicle.parameters.complete() {
-        vehicle.update(true);
-    }
+    vehicle.parameters.complete().await();
+    vehicle.update(true);
 
     println!("params {:?}", vehicle.parameters.get("FS_EKF_THRESH"));
     

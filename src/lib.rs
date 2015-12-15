@@ -5,6 +5,7 @@ extern crate mio;
 extern crate bytes;
 extern crate crc16;
 extern crate eventual;
+extern crate bit_vec;
 
 pub mod mavlink;
 pub mod vehicle;

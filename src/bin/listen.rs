@@ -17,6 +17,8 @@ fn vehicle_loop<F>(mut vehicle: Vehicle, fps: i32, func: F)
     //     func(&mut vehicle);
     // }
 
+    vehicle.init();
+
     vehicle.parameters.complete().await();
     vehicle.update(true);
 

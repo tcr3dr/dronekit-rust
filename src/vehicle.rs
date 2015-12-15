@@ -1,7 +1,9 @@
 extern crate mio;
+extern crate bit_vec;
 
 use mavlink::*;
 use crc16;
+use std::iter::FromIterator;
 
 use std::num::Wrapping;
 use byteorder::{BigEndian, LittleEndian, ReadBytesExt};
@@ -23,7 +25,7 @@ use std::sync::mpsc::{channel, Sender, Receiver, RecvError, TryRecvError};
 use std::cell::RefCell;
 use std::rc::Rc;
 use eventual::{Future, Async};
-use std::sync::RwLock;
+use bit_vec::BitVec;
 
 const CLIENT: mio::Token = mio::Token(0);
 
@@ -153,18 +155,29 @@ impl Vehicle {
         }
     }
 
+    pub fn init (&mut self) {
+        self.send_heartbeat();
+        while !self.connection.borrow().started {
+            self.update(true);
+        }
+    }
+
+    fn send_heartbeat(&mut self) {
+        self.connection.borrow_mut().send(DkMessage::HEARTBEAT(HEARTBEAT_DATA {
+            custom_mode: 0,
+            mavtype: 6,
+            autopilot: 8,
+            base_mode: 0,
+            system_status: 0,
+            mavlink_version: 0x3,
+        }));
+    }
+
     fn on_message(&mut self, pkt: DkMessage) {
         let pkt2 = pkt.clone();
         match pkt {
             DkMessage::HEARTBEAT(..) => {
-                self.connection.borrow_mut().send(DkMessage::HEARTBEAT(HEARTBEAT_DATA {
-                    custom_mode: 0,
-                    mavtype: 6,
-                    autopilot: 8,
-                    base_mode: 0,
-                    system_status: 0,
-                    mavlink_version: 0x3,
-                }));
+                self.send_heartbeat();
 
                 // if let Ok(Some(n)) = res {
                 //     if n != outlen {
@@ -287,31 +300,38 @@ impl Parameters {
     pub fn complete(&self) -> Future<(), ()> {
         let (tx, future) = Future::<(), ()>::pair();
 
-        let mut conn = self.connection.borrow_mut();
+        // Create the bit vector
+        let mut filledlist: BitVec = BitVec::from_iter(self.indexes.iter().map(|x| x.is_some()));
+        if self.indexes.len() > 0 && filledlist.all() {
+            tx.complete(());
+        } else {
+            let mut conn = self.connection.borrow_mut();
+            let buffer = conn.cork();
 
-        let buffer = conn.cork();
-        
-        let mut txlock = Some(tx);
-        let watch = move |msg| {
-            // if let DkMessage::PARAM_VALUE(data) = msg {
-            //     if parse_mavlink_string(&data.param_id) == name {
-            //         if data.param_value == value {
-            //             if let Some(tx) = txlock.take() {
-            //                 tx.complete(());
-            //             }
-            //             return false;
-            //         }
-            //     }
-            // }
-            // true
-            false
-        };
+            let mut txlock = Some(tx);
+            let mut watch = move |msg| {
+                // println!("watchers! {:?}", msg);
+                if let DkMessage::PARAM_VALUE(data) = msg {
+                    if data.param_count as usize != filledlist.len() {
+                        filledlist = BitVec::from_elem(data.param_count as usize, false);
+                    }
+                    filledlist.set(data.param_index as usize, true);
+                    if filledlist.all() {
+                        if let Some(tx) = txlock.take() {
+                            tx.complete(());
+                        }
+                        return false;
+                    }
+                }
+                true
+            };
 
-        if !buffer.into_iter().any(|x| !watch(x)) {
-            conn.tx.send(DkHandlerMessage::TxWatcher(Box::new(watch)));
+            if !buffer.into_iter().any(|x| !watch(x)) {
+                conn.tx.send(DkHandlerMessage::TxWatcher(Box::new(watch)));
+            }
+            
+            conn.uncork();
         }
-
-        conn.uncork();
 
         future
     }

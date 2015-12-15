@@ -2,7 +2,8 @@ extern crate dronekit;
 extern crate eventual;
 
 use std::thread;
-use dronekit::vehicle::{Vehicle, connect};
+use dronekit::vehicle::{Vehicle};
+use dronekit::{connect};
 use eventual::Async;
 
 fn tick(vehicle: &mut Vehicle) {

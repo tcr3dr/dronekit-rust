@@ -50,14 +50,33 @@ fn vehicle_loop(mut vehicle: Vehicle) {
     )).await().unwrap();
     vehicle.update(true);
 
+    println!("sleeping");
+    ::std::thread::sleep_ms(3000);
+
     println!("Setting mode...");
     vehicle.set_mode(VehicleMode::GUIDED).await().unwrap();
 
     println!("Arming...");
     vehicle.arm().await().unwrap();
 
-    println!("spinning.");
+    println!("Takeoff...");
+    vehicle.takeoff(30.0).await().unwrap();
 
+    println!("Elevating...");
+    vehicle.wait_alt(30.0).await().unwrap();
+    
+    vehicle.update(true);
+    println!("ok {:?}", vehicle.location_local);
+
+    println!("Goto...");
+    vehicle.goto();
+
+    loop {
+        ::std::thread::sleep_ms(10);
+        vehicle.retry();
+    }
+
+    println!("spinning.");
     vehicle.spin();
 }
 

@@ -108,6 +108,33 @@ pub enum DkHandlerMessage {
 
 impl DkHandler {
     fn dispatch(&mut self, pkt: DkMessage) {
+        // match pkt.clone() {
+        //     DkMessage::SYS_STATUS(..) |
+        //     DkMessage::PARAM_VALUE(..) |
+        //     DkMessage::NAV_CONTROLLER_OUTPUT(..) |
+        //     DkMessage::SCALED_IMU2(..) |
+        //     DkMessage::GLOBAL_POSITION_INT(..) |
+        //     DkMessage::LOCAL_POSITION_NED(..) |
+        //     DkMessage::SERVO_OUTPUT_RAW(..) |
+        //     DkMessage::ATTITUDE(..) |
+        //     DkMessage::RC_CHANNELS_RAW(..) |
+        //     DkMessage::SCALED_PRESSURE(..) |
+        //     DkMessage::VFR_HUD(..) |
+        //     DkMessage::SYSTEM_TIME(..) |
+        //     DkMessage::TERRAIN_REPORT(..) |
+        //     DkMessage::VIBRATION(..) |
+        //     DkMessage::RAW_IMU(..) |
+        //     DkMessage::TERRAIN_DATA(..) |
+        //     DkMessage::GPS_RAW_INT(..) |
+        //     DkMessage::MISSION_CURRENT(..) |
+        //     DkMessage::TERRAIN_REQUEST(..) |
+        //     DkMessage::HEARTBEAT(..) => {
+        //     },
+        //     _ => {
+        //         println!("OK {:?}", pkt);
+        //     }
+        // }
+
         let pkt2 = pkt.clone();
         self.vehicle_tx.send(DkHandlerRx::RxMessage(pkt)).unwrap();
 

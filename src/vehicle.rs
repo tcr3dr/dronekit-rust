@@ -117,6 +117,17 @@ impl Parameters {
     }
 }
 
+trait Distance<T> {
+    fn distance_to(&self, &T) -> f32;
+}
+
+
+#[derive(Clone, Debug)]
+pub struct LocationGlobalRelative {
+    pub alt: i32,
+    pub lat: i32,
+    pub lon: i32,
+}
 
 #[derive(Clone, Debug)]
 pub struct LocationGlobal {
@@ -125,10 +136,35 @@ pub struct LocationGlobal {
     pub lon: i32,
 }
 
+#[derive(Clone, Debug)]
+pub struct LocationLocal {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+}
+
+impl LocationLocal {
+    fn translate(&self, x: f32, y: f32, z: f32) -> LocationLocal {
+        LocationLocal {
+            x: self.x + x,
+            y: self.y + y,
+            z: self.z + z,
+        }
+    }
+}
+
+impl Distance<LocationLocal> for LocationLocal {
+    fn distance_to(&self, to: &LocationLocal) -> f32 {
+        ((self.x - to.x).powi(2) + (self.y - to.y).powi(2) + (self.z - to.z).powi(2)).sqrt()
+    }
+}
+
 // #[derive(Clone, Debug)]
 pub struct Vehicle {
     pub parameters: Parameters,
     pub location_global: Option<LocationGlobal>,
+    pub location_global_relative: Option<LocationGlobalRelative>,
+    pub location_local: Option<LocationLocal>,
     connection: Rc<RefCell<VehicleConnection>>,
     master_heartbeat: bool,
 }
@@ -139,6 +175,8 @@ impl Vehicle {
         Vehicle {
             parameters: Parameters::new(connection.clone()),
             location_global: None,
+            location_global_relative: None,
+            location_local: None,
             connection: connection,
             master_heartbeat: false,
         }
@@ -202,7 +240,7 @@ impl Vehicle {
             target_system: 0,
             target_component: 0,
             req_stream_id: 0,
-            req_message_rate: 100,
+            req_message_rate: 10,
             start_stop: 1,
         }));
     }
@@ -211,29 +249,45 @@ impl Vehicle {
         match pkt {
             DkMessage::HEARTBEAT(..) => {
                 self.send_heartbeat();
+                // self.connection.borrow_mut().send(DkMessage::MISSION_REQUEST_LIST(MISSION_REQUEST_LIST_DATA {
+                //     target_system: 0,
+                //     target_component: 0,
+                // }));
                 self.master_heartbeat = true;
-            },
+            }
             DkMessage::STATUSTEXT(data) => {
                 let text = parse_mavlink_string(&data.text);
                 println!("<<< [{:?}] {:?}", data.severity, text);
-            },
+            }
             DkMessage::PARAM_VALUE(data) => {
                 self.parameters.resize(data.param_count);
                 self.parameters.assign(data.param_index, &parse_mavlink_string(&data.param_id), data.param_value);
-            },
+            }
             DkMessage::ATTITUDE(..) => {
                 // println!("roll: {:?}\tpitch: {:?}\tyaw: {:?}", data.roll, data.pitch, data.yaw);
-            },
+            }
             DkMessage::GLOBAL_POSITION_INT(data) => {
                 self.location_global = Some(LocationGlobal {
                     lat: data.lat,
                     lon: data.lon,
                     alt: data.alt,
                 });
-            },
+                self.location_global_relative = Some(LocationGlobalRelative {
+                    lat: data.lat,
+                    lon: data.lon,
+                    alt: data.relative_alt,
+                });
+            }
+            DkMessage::LOCAL_POSITION_NED(data) => {
+                self.location_local = Some(LocationLocal {
+                    x: data.x,
+                    y: data.y,
+                    z: data.z,
+                });
+            }
             _ => {
                 // println!("dunno: {:?}", pkt);
-            },
+            }
         }
     }
 
@@ -263,13 +317,17 @@ impl Vehicle {
         let (tx, future) = Future::<(), ()>::pair();
 
         let mut conn = self.connection.borrow_mut();
+
+        let mut ack = false;
+        let mut armed = false;
         
         conn.complete(tx, Box::new(move |msg| {
-            if let DkMessage::HEARTBEAT(data) = msg {
-                (data.base_mode & 128) != 0
-            } else {
-                false
+            if let DkMessage::COMMAND_ACK(data) = msg {
+                ack = ack || data.command == 400;
+            } else if let DkMessage::HEARTBEAT(data) = msg {
+                armed = armed || ((data.base_mode & 128) != 0);
             }
+            ack && armed
         }));
 
         conn.send(DkMessage::COMMAND_LONG(COMMAND_LONG_DATA {
@@ -284,6 +342,126 @@ impl Vehicle {
             param5: 0.0,
             param6: 0.0,
             param7: 0.0,
+        }));
+
+        future
+    }
+
+    pub fn takeoff(&mut self, target_alt: f32) -> Future<(), ()> {
+        let (tx, future) = Future::<(), ()>::pair();
+
+        let mut conn = self.connection.borrow_mut();
+
+        let mut ack = false;
+        let mut is_active = false;
+        
+        conn.complete(tx, Box::new(move |msg| {
+            match msg {
+                DkMessage::HEARTBEAT(data) => {
+                    is_active = is_active || data.system_status == 4;
+                }
+                DkMessage::COMMAND_ACK(data) => {
+                    ack = ack || (data.command == 22);
+                }
+                // DkMessage::LOCAL_POSITION_NED(data) => {
+                //     alt_achieved = alt_achieved || ((target_alt + data.z).abs() < 2.0);
+                // }
+                _ => ()
+            }
+            ack && is_active
+        }));
+
+        conn.send(DkMessage::COMMAND_LONG(COMMAND_LONG_DATA {
+            target_system: 0,
+            target_component: 0,
+            command: 22,
+            confirmation: 0,
+            param1: 0.0,
+            param2: 0.0,
+            param3: 0.0,
+            param4: 0.0,
+            param5: 0.0,
+            param6: 0.0,
+            param7: target_alt,
+        }));
+
+        future
+    }
+
+    pub fn retry(&mut self) {
+        let mut conn = self.connection.borrow_mut();
+        conn.send(DkMessage::SET_POSITION_TARGET_LOCAL_NED(SET_POSITION_TARGET_LOCAL_NED_DATA {
+            time_boot_ms: 10,
+            target_system: 0,
+            target_component: 0,
+            coordinate_frame: 1,
+            type_mask: 0b0000_111_111_000_000,
+            x: -20.0,
+            y: -20.0,
+            z: -30.0,
+            vx: 0.1,
+            vy: 0.1,
+            vz: 0.1,
+            afx: 0.0,
+            afy: 0.0,
+            afz: 0.0,
+            yaw: 0.0,
+            yaw_rate: 0.0,
+        }));
+    }
+
+    pub fn goto(&mut self) -> Future<(), ()> {
+        let (tx, future) = Future::<(), ()>::pair();
+
+        let mut conn = self.connection.borrow_mut();
+
+        let mut ack = false;
+        let mut is_active = false;
+        
+        conn.complete(tx, Box::new(move |msg| {
+            match msg {
+                DkMessage::LOCAL_POSITION_NED(data) => {
+                    println!("local pos {:?}", data);
+                    // alt_achieved = alt_achieved || ((target_alt + data.z).abs() < 2.0);
+                }
+                _ => ()
+            }
+            ack && is_active
+        }));
+
+        conn.send(DkMessage::SET_POSITION_TARGET_LOCAL_NED(SET_POSITION_TARGET_LOCAL_NED_DATA {
+            time_boot_ms: 0,
+            target_system: 0,
+            target_component: 0,
+            coordinate_frame: 1,
+            type_mask: 0b0000_111_111_000_000,
+            x: -20.0,
+            y: -20.0,
+            z: -30.0,
+            vx: 0.1,
+            vy: 0.1,
+            vz: 0.1,
+            afx: 0.0,
+            afy: 0.0,
+            afz: 0.0,
+            yaw: 0.0,
+            yaw_rate: 0.0,
+        }));
+
+        future
+    }
+
+    pub fn wait_alt(&mut self, target_alt: f32) -> Future<(), ()> {
+        let (tx, future) = Future::<(), ()>::pair();
+
+        let mut conn = self.connection.borrow_mut();
+
+        conn.complete(tx, Box::new(move |msg| {
+            if let DkMessage::LOCAL_POSITION_NED(data) = msg {
+                ((target_alt + data.z).abs() < 2.0)
+            } else {
+                false
+            }
         }));
 
         future

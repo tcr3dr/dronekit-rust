@@ -65,6 +65,8 @@ fn vehicle_loop(mut vehicle: Vehicle) {
     println!("Elevating...");
     vehicle.wait_alt(30.0).await().unwrap();
 
+    vehicle.set_airspeed().await().unwrap();
+
     vehicle.update(true);
     println!("ok {:?}", vehicle.location_local);
 

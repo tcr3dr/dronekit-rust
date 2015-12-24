@@ -397,6 +397,37 @@ impl Vehicle {
         future
     }
 
+    pub fn set_airspeed(&mut self) -> Future<(), ()> {
+        let (tx, future) = Future::<(), ()>::pair();
+
+        let mut conn = self.connection.borrow_mut();
+
+        conn.complete(tx, Box::new(move |msg| {
+            match msg {
+                DkMessage::COMMAND_ACK(data) => {
+                    data.command == 178
+                }
+                _ => false
+            }
+        }));
+
+        conn.send(DkMessage::COMMAND_LONG(COMMAND_LONG_DATA {
+            target_system: 0,
+            target_component: 0,
+            command: 178,
+            confirmation: 0,
+            param1: 1.0,
+            param2: 1.0,
+            param3: -1.0,
+            param4: 0.0,
+            param5: 0.0,
+            param6: 0.0,
+            param7: 0.0,
+        }));
+
+        future
+    }
+
     pub fn retry(&mut self) {
         let mut conn = self.connection.borrow_mut();
         conn.send(DkMessage::SET_POSITION_TARGET_LOCAL_NED(SET_POSITION_TARGET_LOCAL_NED_DATA {
@@ -405,12 +436,12 @@ impl Vehicle {
             target_component: 0,
             coordinate_frame: 1,
             type_mask: 0b0000_111_111_000_000,
-            x: -20.0,
-            y: -20.0,
+            x: -100.0,
+            y: -100.0,
             z: -30.0,
-            vx: 0.1,
-            vy: 0.1,
-            vz: 0.1,
+            vx: 100.0,
+            vy: 100.0,
+            vz: 0.0,
             afx: 0.0,
             afy: 0.0,
             afz: 0.0,
@@ -431,6 +462,7 @@ impl Vehicle {
             match msg {
                 DkMessage::LOCAL_POSITION_NED(data) => {
                     println!("local pos {:?}", data);
+                    println!("speed: {:?}", (data.vx.powi(2) + data.vy.powi(2) + data.vz.powi(2)).sqrt());
                     // alt_achieved = alt_achieved || ((target_alt + data.z).abs() < 2.0);
                 }
                 _ => ()
@@ -444,12 +476,12 @@ impl Vehicle {
             target_component: 0,
             coordinate_frame: 1,
             type_mask: 0b0000_111_111_000_000,
-            x: -20.0,
-            y: -20.0,
+            x: -100.0,
+            y: -100.0,
             z: -30.0,
-            vx: 0.1,
-            vy: 0.1,
-            vz: 0.1,
+            vx: 1.0,
+            vy: 5.0,
+            vz: 0.0,
             afx: 0.0,
             afy: 0.0,
             afz: 0.0,

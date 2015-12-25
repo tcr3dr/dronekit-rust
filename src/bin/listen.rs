@@ -47,6 +47,6 @@ fn main() {
     vehicle.update(true);
     println!("Current location: {:?}", vehicle.location_local);
 
-    println!("done. now just spinning forever.");
-    vehicle.spin();
+    println!("done!");
+    // vehicle.spin();
 }

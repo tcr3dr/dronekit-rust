@@ -139,7 +139,7 @@ pub struct LocationGlobal {
     pub lon: i32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Copy, Clone, Debug)]
 pub struct LocationLocal {
     pub x: f32,
     pub y: f32,
@@ -428,29 +428,7 @@ impl Vehicle {
         future
     }
 
-    pub fn retry(&mut self) {
-        let mut conn = self.connection.borrow_mut();
-        conn.send(DkMessage::SET_POSITION_TARGET_LOCAL_NED(SET_POSITION_TARGET_LOCAL_NED_DATA {
-            time_boot_ms: 10,
-            target_system: 0,
-            target_component: 0,
-            coordinate_frame: 1,
-            type_mask: 0b0000_111_111_000_000,
-            x: -100.0,
-            y: -100.0,
-            z: -30.0,
-            vx: 100.0,
-            vy: 100.0,
-            vz: 0.0,
-            afx: 0.0,
-            afy: 0.0,
-            afz: 0.0,
-            yaw: 0.0,
-            yaw_rate: 0.0,
-        }));
-    }
-
-    pub fn goto(&mut self) -> Future<(), ()> {
+    pub fn goto(&mut self, target: LocationLocal) -> Future<(), ()> {
         let (tx, future) = Future::<(), ()>::pair();
 
         let mut conn = self.connection.borrow_mut();
@@ -461,8 +439,12 @@ impl Vehicle {
         conn.complete(tx, Box::new(move |msg| {
             match msg {
                 DkMessage::LOCAL_POSITION_NED(data) => {
-                    println!("local pos {:?}", data);
-                    println!("speed: {:?}", (data.vx.powi(2) + data.vy.powi(2) + data.vz.powi(2)).sqrt());
+                    let distance = ((target.x - data.x).powi(2) + (target.y - data.y).powi(2) + (target.z - data.z).powi(2)).sqrt();
+                    if distance < 2.0 {
+                        return true
+                    }
+                    // println!("local pos {:?}", data);
+                    // println!("speed: {:?}", (data.vx.powi(2) + data.vy.powi(2) + data.vz.powi(2)).sqrt());
                     // alt_achieved = alt_achieved || ((target_alt + data.z).abs() < 2.0);
                 }
                 _ => ()
@@ -475,12 +457,12 @@ impl Vehicle {
             target_system: 0,
             target_component: 0,
             coordinate_frame: 1,
-            type_mask: 0b0000_111_111_000_000,
-            x: -100.0,
-            y: -100.0,
-            z: -30.0,
-            vx: 1.0,
-            vy: 5.0,
+            type_mask: 0b0000_111_111_111_000,
+            x: target.x,
+            y: target.y,
+            z: target.z,
+            vx: 0.0,
+            vy: 0.0,
             vz: 0.0,
             afx: 0.0,
             afy: 0.0,
